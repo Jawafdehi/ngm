@@ -43,10 +43,4 @@ jobs:
         run: ./scripts/format.sh --check
 
       - name: Run tests
-        run: |
-          if poetry run pytest --collect-only -q 2>&1 | grep -q "no tests ran"; then
-            echo "No tests found, skipping..."
-          else
-            poetry run pytest --tb=short -q
-          fi
-
+        run: poetry run pytest --tb=short -q
