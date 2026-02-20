@@ -33,17 +33,19 @@ class CiaaAnnualReportsSpider(scrapy.Spider):
         if not os.path.exists(self.files_store):
             self.logger.info(f"Output directory doesn't exist yet: {self.files_store}")
             return
-        
+
         for filename in os.listdir(self.files_store):
-            if filename.endswith('.pdf'):
+            if filename.endswith(".pdf"):
                 # Extract file ID from filename (last part before .pdf)
                 # Format: "serial. title - FILE_ID.pdf"
-                parts = filename.rsplit(' - ', 1)
+                parts = filename.rsplit(" - ", 1)
                 if len(parts) == 2:
-                    file_id = parts[1].replace('.pdf', '')
+                    file_id = parts[1].replace(".pdf", "")
                     self.seen_files.add(file_id)
-        
-        self.logger.info(f"Found {len(self.seen_files)} existing files, will skip duplicates")
+
+        self.logger.info(
+            f"Found {len(self.seen_files)} existing files, will skip duplicates"
+        )
 
     def get_site_root(self, response):
         parsed = urlparse(response.url)
@@ -53,7 +55,7 @@ class CiaaAnnualReportsSpider(scrapy.Spider):
         # Load existing files on first parse call (when logger is available)
         if not self.seen_files:
             self._load_existing_files()
-        
+
         site_root = self.get_site_root(response)
 
         rows = response.xpath(
@@ -83,7 +85,7 @@ class CiaaAnnualReportsSpider(scrapy.Spider):
             if not pdf_url.startswith("http"):
                 pdf_url = site_root + pdf_url.lstrip("/")
 
-            #hARD STRIP index.php (CIAA CMS bug)
+            # hARD STRIP index.php (CIAA CMS bug)
             pdf_url = pdf_url.replace("/index.php/", "/")
 
             # Extract file ID and check for duplicates
@@ -102,7 +104,7 @@ class CiaaAnnualReportsSpider(scrapy.Spider):
                     "source_page": response.url,
                 },
             }
-            
+
             # Add to seen_files for in-run deduplication
             self.seen_files.add(file_id)
 
