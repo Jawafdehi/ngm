@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 from scrapy.pipelines.files import FilesPipeline
 from sqlalchemy.orm.attributes import flag_modified
 from ngm.database.models import get_engine, get_session, CourtCase
@@ -117,7 +118,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
         file_ext = item.get('file_extension')
         if not file_ext:
-            file_ext = os.path.splitext(request.url)[1]
+            # Parse URL path to avoid including query strings in extension
+            url_path = urlparse(request.url).path
+            file_ext = os.path.splitext(url_path)[1]
         if not file_ext:
             file_ext = '.doc'
 
