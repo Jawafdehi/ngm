@@ -7,11 +7,10 @@ Use supreme_orders_enrichment.py to download the actual order documents.
 
 Target: https://supremecourt.gov.np/cp/
 """
-import urllib.parse
 import scrapy
 import re
 import os
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, unquote
 from datetime import datetime
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
@@ -61,8 +60,10 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         # Print which database we're using
         db_type = "LOCAL" if os.getenv('LOCAL_DATABASE_URL') else "PRODUCTION"
         print(f"\n{'='*60}")
+        parsed = urlparse(db_url)
+        safe_url = f"{parsed.scheme}://****:****@{parsed.hostname}{parsed.path}"
         print(f"Using {db_type} database")
-        print(f"DATABASE_URL: {db_url}")
+        print(f"DATABASE_URL: {safe_url}")
         print(f"{'='*60}\n")
         
         self.engine = get_engine(db_url)
@@ -256,6 +257,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 court_identifier=court_identifier,
                 error_message=str(e)
             )
+            yield from self._yield_next_case()  #dont stall the queue
 
     def _extract_captcha_from_session_cookie(self, response):
         """Extract CAPTCHA answer from leaked session cookie."""
@@ -265,7 +267,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             if 'court_session=' not in val:
                 continue
 
-            unquoted = urllib.parse.unquote(val)
+            unquoted = unquote(val)
             match = re.search(r'"captcha_word";s:\d+:"([^"]+)"', unquoted)
             if match:
                 return match.group(1)
@@ -307,7 +309,6 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     def parse_search_results(self, response):
         """Parse search results and save order information to database."""
         case_number = response.meta.get('case_number')
-        court_identifier = response.meta.get('court_identifier')
 
         if response.status == 302:
             redirect_url = response.headers.get('Location', b'').decode('utf-8')

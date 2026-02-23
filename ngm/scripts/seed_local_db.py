@@ -36,7 +36,7 @@ def seed_database(prod_url, local_url, cases_limit=200):
     Args:
         prod_url: Production database URL (read-only)
         local_url: Local database URL (read-write)
-        cases_limit: Number of cases to seed (default: 50)
+        cases_limit: Number of cases to seed (default: 200)
     """
     
     print("=" * 60)
@@ -197,7 +197,7 @@ def seed_database(prod_url, local_url, cases_limit=200):
 
 def main():
     parser = argparse.ArgumentParser(description="Seed local database with production data")
-    parser.add_argument("--limit", type=int, default=500, help="Number of cases to seed (default: 50)")
+    parser.add_argument("--limit", type=int, default=200, help="Number of cases to seed (default: 200)")
     
     args = parser.parse_args()
     
