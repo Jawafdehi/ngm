@@ -21,33 +21,29 @@ from ngm.utils.court_ids import HIGH_COURTS, DISTRICT_COURTS
 
 # Direct mapping for courts that don't need a numeric ID
 COURT_TYPE_MAP = {
-    'supreme': ('S', ''),
-    'special': ('T', ''),
+    "supreme": ("S", ""),
+    "special": ("T", ""),
 }
 
 # Build high court mapping from court_ids.py list
 # Assumes list order matches the website's numeric IDs (1, 2, 3 ...)
 HIGH_COURT_ID_MAP = {
-    court['identifier']: str(idx + 1)
-    for idx, court in enumerate(HIGH_COURTS)
+    court["identifier"]: str(idx + 1) for idx, court in enumerate(HIGH_COURTS)
 }
 
 # Reverse: numeric ID → identifier (for converting website data back to DB)
 HIGH_COURT_REVERSE_MAP = {
-    str(idx + 1): court['identifier']
-    for idx, court in enumerate(HIGH_COURTS)
+    str(idx + 1): court["identifier"] for idx, court in enumerate(HIGH_COURTS)
 }
 
 # Build district court mapping using explicit district_id from court_ids.py
 DISTRICT_COURT_ID_MAP = {
-    court['code_name']: str(court['district_id'])
-    for court in DISTRICT_COURTS
+    court["code_name"]: str(court["district_id"]) for court in DISTRICT_COURTS
 }
 
 # Reverse: district_id → code_name
 DISTRICT_COURT_REVERSE_MAP = {
-    str(court['district_id']): court['code_name']
-    for court in DISTRICT_COURTS
+    str(court["district_id"]): court["code_name"] for court in DISTRICT_COURTS
 }
 
 
@@ -78,10 +74,10 @@ def get_court_params(court_identifier: str) -> Tuple[str, str]:
         return COURT_TYPE_MAP[court_identifier]
 
     if court_identifier in HIGH_COURT_ID_MAP:
-        return ('A', HIGH_COURT_ID_MAP[court_identifier])
+        return ("A", HIGH_COURT_ID_MAP[court_identifier])
 
     if court_identifier in DISTRICT_COURT_ID_MAP:
-        return ('D', DISTRICT_COURT_ID_MAP[court_identifier])
+        return ("D", DISTRICT_COURT_ID_MAP[court_identifier])
 
     raise ValueError(
         f"Unknown court identifier: '{court_identifier}'. "
@@ -112,25 +108,23 @@ def get_court_identifier(court_type: str, court_id: str) -> str:
         >>> get_court_identifier('D', '39')
         'kathmandudc'
     """
-    if court_type == 'S':
-        return 'supreme'
+    if court_type == "S":
+        return "supreme"
 
-    if court_type == 'T':
-        return 'special'
+    if court_type == "T":
+        return "special"
 
-    if court_type == 'A':
+    if court_type == "A":
         if court_id in HIGH_COURT_REVERSE_MAP:
             return HIGH_COURT_REVERSE_MAP[court_id]
         raise ValueError(f"Unknown high court ID: '{court_id}'")
 
-    if court_type == 'D':
+    if court_type == "D":
         if court_id in DISTRICT_COURT_REVERSE_MAP:
             return DISTRICT_COURT_REVERSE_MAP[court_id]
         raise ValueError(f"Unknown district court ID: '{court_id}'")
 
-    raise ValueError(
-        f"Unknown court type: '{court_type}'. Expected S, T, A, or D."
-    )
+    raise ValueError(f"Unknown court type: '{court_type}'. Expected S, T, A, or D.")
 
 
 def is_valid_court_identifier(court_identifier: str) -> bool:
