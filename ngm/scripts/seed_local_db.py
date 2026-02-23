@@ -198,6 +198,11 @@ def seed_database(prod_url, local_url, cases_limit=200):
 def main():
     parser = argparse.ArgumentParser(description="Seed local database with production data")
     parser.add_argument("--limit", type=int, default=200, help="Number of cases to seed (default: 200)")
+    parser.add_argument(
+        "--confirm-prod-seed",
+        action="store_true",
+        help="Acknowledge that production data will be copied locally (required)",
+    )
     
     args = parser.parse_args()
     
@@ -210,7 +215,15 @@ def main():
         print("Example:")
         print("export DATABASE_URL='postgresql://<user>:<password>@<host>:5432/<dbname>'")
         print("export LOCAL_DATABASE_URL='postgresql://<user>:<password>@localhost:5433/<dbname>'")
-        print("poetry run python ngm/scripts/seed_local_db.py")
+        print("poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed")
+        sys.exit(1)
+    
+    if not args.confirm_prod_seed:
+        print("ERROR: Refusing to seed from production without --confirm-prod-seed flag")
+        print("This is a safety measure to prevent accidental copying of production data.")
+        print()
+        print("To proceed, run:")
+        print("poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed")
         sys.exit(1)
     
     try:
