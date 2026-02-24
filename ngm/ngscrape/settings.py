@@ -47,6 +47,13 @@ DOWNLOAD_TIMEOUT = 600
 RETRY_TIMES = 3
 RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429]
 
+# CAPTCHA extraction from session cookies
+# WARNING: This feature extracts CAPTCHA answers from server session cookies in supreme_court_orders scraper
+# This behavior may have legal and compliance implications.
+# REQUIRES documented legal/compliance approval before enabling in production.
+# Set to True only after obtaining proper authorization.
+ENABLE_CAPTCHA_COOKIE_EXTRACT = True
+
 # Disable cookies (enabled by default)
 # COOKIES_ENABLED = False
 

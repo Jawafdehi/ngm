@@ -53,7 +53,7 @@ You should see `Tables created!` — if you get a `gin_trgm_ops` error, make sur
 ## Step 3 — Set Environment Variables
 
 **Database URL Format:**
-```
+```text
 postgresql://username:password@host:port/database_name
 ```
 
@@ -66,11 +66,11 @@ export LOCAL_DATABASE_URL='postgresql://ngm:ngm_local@localhost:5433/ngm_local'
 ## Step 4 — Run the Seeding Script
 
 ```bash
-# Default (50 cases)
-poetry run python ngm/scripts/seed_local_db.py
+# Default (200 cases) - requires confirmation flag
+poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
 
 # Custom limit
-poetry run python ngm/scripts/seed_local_db.py --limit 200
+poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
 ```
 
 ---
@@ -78,7 +78,7 @@ poetry run python ngm/scripts/seed_local_db.py --limit 200
 ## What Gets Seeded
 
 1. **All Courts** - Complete list of courts in Nepal
-2. **Cases** - Special court cases with verdicts (default: 50, customizable with `--limit`)
+2. **Cases** - Special court cases with verdicts (default: 200, customizable with `--limit`)
 3. **Hearings** - All hearing records for the seeded cases
 
 ## Verify the Data

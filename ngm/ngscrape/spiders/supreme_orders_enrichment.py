@@ -15,6 +15,7 @@ from datetime import datetime
 import pytz
 from sqlalchemy import and_, or_
 from sqlalchemy.orm.attributes import flag_modified
+from urllib.parse import urlparse
 
 from ngm.database.models import get_engine, get_session, init_db, CourtCase
 from ngm.ngscrape.settings import FILES_STORE
@@ -110,7 +111,8 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                 self.logger.warning(f"Case {case.case_number} has no document URL")
                 continue
 
-            file_ext = os.path.splitext(document_url)[1]
+            url_path = urlparse(document_url).path
+            file_ext = os.path.splitext(url_path)[1]
             if not file_ext:
                 file_ext = ".doc"
 
@@ -183,6 +185,20 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
             self.logger.error(f"HTTP {response.status} for case {case_number}")
             self._mark_download_failed(
                 case_number, court_identifier, f"HTTP {response.status}"
+            )
+            return
+
+        # CHECK if FILES_STORE is a remote path
+        if FILES_STORE.startswith(("s3://", "gs://", "ftp://")):
+            self.logger.error(
+                f"Enrichment spider requires local filesystem storage. "
+                f"Got remote storage: {FILES_STORE}. "
+                f"Use a storage backend pipeline for remote storage."
+            )
+            self._mark_download_failed(
+                case_number,
+                court_identifier,
+                f"Remote storage not supported: {FILES_STORE}",
             )
             return
 

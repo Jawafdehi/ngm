@@ -1,18 +1,18 @@
 """
 Seed local database with data from production database.
-
 Usage:
     export DATABASE_URL=''
     export LOCAL_DATABASE_URL=''
-    poetry run python ngm/scripts/seed_local_db.py
+    poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
 
 Or with custom limit:
-    poetry run python ngm/scripts/seed_local_db.py --limit 100
+    poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
 """
 
 import os
 import sys
 import argparse
+from urllib.parse import urlparse
 from ngm.database.models import (
     get_engine,
     get_session,
@@ -41,6 +41,17 @@ def seed_database(prod_url, local_url, cases_limit=200):
         cases_limit: Number of cases to seed (default: 200)
     """
 
+    # Prevent accidental production writes
+    def _db_identity(url: str):
+        parsed = urlparse(url)
+        return (parsed.hostname, parsed.port, parsed.path)
+
+    if _db_identity(prod_url) == _db_identity(local_url):
+        raise ValueError(
+            "SAFETY CHECK FAILED: LOCAL_DATABASE_URL points to the same database as DATABASE_URL. "
+            "Aborting to prevent accidental production writes."
+        )
+
     print("=" * 60)
     print("NGM Database Seeding")
     print("=" * 60)
@@ -48,8 +59,7 @@ def seed_database(prod_url, local_url, cases_limit=200):
     print(
         f"Local DB:      {local_url.split('@')[1] if '@' in local_url else local_url}"
     )
-    print(f"Cases limit:   {cases_limit}")
-    print()
+    print(f"Cases limit:   {cases_limit}\n")
 
     # ── Connect to production DB ──────────────────────────────────────────
     print("Connecting to production database...")

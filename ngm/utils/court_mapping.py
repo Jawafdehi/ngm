@@ -16,7 +16,10 @@ Website parameters:
 """
 
 from typing import Tuple
+import logging
 from ngm.utils.court_ids import HIGH_COURTS, DISTRICT_COURTS
+
+_logger = logging.getLogger(__name__)
 
 
 # Direct mapping for courts that don't need a numeric ID
@@ -25,15 +28,14 @@ COURT_TYPE_MAP = {
     "special": ("T", ""),
 }
 
-# Build high court mapping from court_ids.py list
-# Assumes list order matches the website's numeric IDs (1, 2, 3 ...)
+# Build high court mapping using explicit site_id from court_ids.py
 HIGH_COURT_ID_MAP = {
-    court["identifier"]: str(idx + 1) for idx, court in enumerate(HIGH_COURTS)
+    court["identifier"]: str(court["site_id"]) for court in HIGH_COURTS
 }
 
 # Reverse: numeric ID → identifier (for converting website data back to DB)
 HIGH_COURT_REVERSE_MAP = {
-    str(idx + 1): court["identifier"] for idx, court in enumerate(HIGH_COURTS)
+    str(court["site_id"]): court["identifier"] for court in HIGH_COURTS
 }
 
 # Build district court mapping using explicit district_id from court_ids.py
@@ -45,6 +47,29 @@ DISTRICT_COURT_ID_MAP = {
 DISTRICT_COURT_REVERSE_MAP = {
     str(court["district_id"]): court["code_name"] for court in DISTRICT_COURTS
 }
+
+# Validate HIGH_COURTS data integrity at load time
+assert len(HIGH_COURTS) > 0, "HIGH_COURTS list is empty"
+assert len(HIGH_COURTS) == len(HIGH_COURT_ID_MAP), (
+    f"HIGH_COURTS length mismatch: expected {len(HIGH_COURTS)}, "
+    f"got {len(HIGH_COURT_ID_MAP)} in mapping"
+)
+
+# Validate site_id sequence is complete (1 to N)
+expected_ids = set(range(1, len(HIGH_COURTS) + 1))
+actual_ids = {court["site_id"] for court in HIGH_COURTS}
+if expected_ids != actual_ids:
+    missing = expected_ids - actual_ids
+    extra = actual_ids - expected_ids
+    raise ValueError(
+        f"HIGH_COURTS site_id validation failed. "
+        f"Missing IDs: {sorted(missing) if missing else 'none'}, "
+        f"Extra IDs: {sorted(extra) if extra else 'none'}"
+    )
+
+_logger.debug(
+    f"HIGH_COURTS mapping initialized with {len(HIGH_COURTS)} courts using explicit site_id"
+)
 
 
 def get_court_params(court_identifier: str) -> Tuple[str, str]:
