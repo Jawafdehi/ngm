@@ -268,24 +268,24 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     def _extract_captcha_from_session_cookie(self, response):
         """
         Extract CAPTCHA answer from leaked session cookie.
-        
+
         WARNING: This feature is gated behind ENABLE_CAPTCHA_COOKIE_EXTRACT setting.
         Requires documented legal/compliance approval before enabling in production.
         """
         # Check if the feature is enabled via settings
-        if not self.settings.getbool('ENABLE_CAPTCHA_COOKIE_EXTRACT', False):
+        if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
             self.logger.debug(
                 "CAPTCHA cookie extraction is disabled. "
                 "Set ENABLE_CAPTCHA_COOKIE_EXTRACT=True in settings after obtaining "
                 "legal/compliance approval to enable this feature."
             )
             return None
-        
+
         self.logger.warning(
             "CAPTCHA cookie extraction is ENABLED. "
             "Ensure legal/compliance approval is documented before using in production."
         )
-        
+
         for header in response.headers.getlist(b"Set-Cookie"):
             val = header.decode("utf-8", errors="ignore")
 
