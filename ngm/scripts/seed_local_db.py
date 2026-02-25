@@ -46,20 +46,12 @@ class SafetyCheckError(Exception):
 
 
 class DatabaseSeeder:
-    """Handles seeding of local database from production."""
+    """Seed local database from production."""
 
     def __init__(self, prod_url: str, local_url: str, cases_limit: int = 200):
-        """
-        Initialize database seeder.
+        if cases_limit <= 0:
+            raise ValueError("cases_limit must be positive")
 
-        Args:
-            prod_url: Production database connection URL (read-only)
-            local_url: Local database connection URL (read-write)
-            cases_limit: Maximum number of cases to seed
-
-        Raises:
-            SafetyCheckError: If prod_url and local_url point to the same database
-        """
         self.prod_url = prod_url
         self.local_url = local_url
         self.cases_limit = cases_limit
@@ -74,48 +66,23 @@ class DatabaseSeeder:
         self.stats = {"courts": 0, "cases": 0, "hearings": 0}
 
     def _validate_urls(self) -> None:
-        """
-        Validate that production and local URLs are different.
-
-        Raises:
-            SafetyCheckError: If URLs point to the same database
-        """
-        if self._get_db_identity(self.prod_url) == self._get_db_identity(
-            self.local_url
-        ):
-            raise SafetyCheckError(
-                "Production and local database URLs point to the same database. "
-                "Aborting to prevent accidental production writes."
-            )
+        """Validate prod and local URLs are different."""
+        if self._get_db_identity(self.prod_url) == self._get_db_identity(self.local_url):
+            raise SafetyCheckError("Prod and local URLs are the same. Aborting.")
 
     @staticmethod
     def _get_db_identity(url: str) -> Tuple[str, int | None, str]:
-        """
-        Extract normalized database identity from connection URL.
-
-        Args:
-            url: Database connection URL
-
-        Returns:
-            Tuple of (hostname, port, database_path) where port may be None
-        """
+        """Extract (hostname, port, path) from DB URL."""
         parsed = urlparse(url)
-        # Strip dialect suffix (e.g., postgresql+psycopg2 -> postgresql)
         scheme = (parsed.scheme or "").lower().split("+", 1)[0]
         hostname = (parsed.hostname or "").lower()
 
-        # Normalize port with scheme defaults
         port = parsed.port
         if port is None:
             default_ports = {"postgresql": 5432, "postgres": 5432, "mysql": 3306}
             port = default_ports.get(scheme)
 
-        port = int(port) if port is not None else None
-
-        # Normalize path
-        path = (parsed.path or "").rstrip("/")
-
-        return (hostname, port, path)
+        return (hostname, port, (parsed.path or "").rstrip("/"))
 
     def _connect_databases(self) -> None:
         """Establish connections to production and local databases."""
@@ -140,35 +107,21 @@ class DatabaseSeeder:
         models._engine_url = None
 
     def _cleanup(self) -> None:
-        """Close database connections and dispose engines."""
-        logger.info("Cleaning up database connections...")
-
-        # Close each resource independently to ensure all cleanup attempts are made
-        try:
-            if self.prod_session:
-                self.prod_session.close()
-        except Exception as e:
-            logger.error(f"Error closing prod_session: {e}")
-
-        try:
-            if self.local_session:
-                self.local_session.close()
-        except Exception as e:
-            logger.error(f"Error closing local_session: {e}")
-
-        try:
-            if self.prod_engine:
-                self.prod_engine.dispose()
-        except Exception as e:
-            logger.error(f"Error disposing prod_engine: {e}")
-
-        try:
-            if self.local_engine:
-                self.local_engine.dispose()
-        except Exception as e:
-            logger.error(f"Error disposing local_engine: {e}")
-
-        logger.info("Cleanup complete")
+        """Close connections and dispose engines."""
+        for resource, name in [
+            (self.prod_session, "prod_session"),
+            (self.local_session, "local_session"),
+            (self.prod_engine, "prod_engine"),
+            (self.local_engine, "local_engine"),
+        ]:
+            if resource:
+                try:
+                    if "session" in name:
+                        resource.close()
+                    else:
+                        resource.dispose()
+                except Exception:
+                    logger.exception(f"Error cleaning up {name}")
 
     def _seed_courts(self) -> None:
         """Seed all courts from production to local database."""
@@ -250,15 +203,12 @@ class DatabaseSeeder:
         return case_data
 
     def _seed_hearings(self, case_data: list) -> None:
-        """
-        Seed hearings for the given cases.
-
-        Args:
-            case_data: List of case dictionaries containing case_number
-        """
+        """Seed hearings for given cases."""
         logger.info("Seeding hearings...")
 
         case_numbers = [c["case_number"] for c in case_data]
+        if not case_numbers:
+            return
 
         with self.prod_session.begin():
             hearings = (
@@ -297,36 +247,20 @@ class DatabaseSeeder:
         logger.info(f"Seeded {len(hearing_data)} hearings")
 
     def seed(self) -> None:
-        """
-        Execute the complete seeding process.
-
-        Raises:
-            Exception: If any step of the seeding process fails
-        """
-        logger.info("=" * 60)
-        logger.info("NGM Database Seeding")
-        logger.info("=" * 60)
-        logger.info(f"Production: {self._mask_url(self.prod_url)}")
-        logger.info(f"Local:      {self._mask_url(self.local_url)}")
-        logger.info(f"Limit:      {self.cases_limit} cases")
-        logger.info("=" * 60)
+        """Execute seeding process."""
+        logger.info(f"Seeding from {self._mask_url(self.prod_url)} to {self._mask_url(self.local_url)}")
+        logger.info(f"Limit: {self.cases_limit} cases")
 
         try:
             self._connect_databases()
-
             self._seed_courts()
             case_data = self._seed_cases()
             self._seed_hearings(case_data)
 
-            logger.info("=" * 60)
-            logger.info("Seeding completed successfully")
-            logger.info("=" * 60)
-            logger.info("Summary:")
-            logger.info(f"  Courts:   {self.stats['courts']}")
-            logger.info(f"  Cases:    {self.stats['cases']}")
-            logger.info(f"  Hearings: {self.stats['hearings']}")
-            logger.info("=" * 60)
-
+            logger.info(
+                f"Seeding complete: {self.stats['courts']} courts, "
+                f"{self.stats['cases']} cases, {self.stats['hearings']} hearings"
+            )
         finally:
             self._cleanup()
 
@@ -439,6 +373,12 @@ def validate_environment() -> Tuple[str, str]:
 def main() -> None:
     """Main entry point for the seeding script."""
     args = parse_arguments()
+    
+    # Validate limit is positive
+    if args.limit <= 0:
+        logger.error("--limit must be a positive integer")
+        sys.exit(1)
+    
     prod_url, local_url = validate_environment()
 
     try:
@@ -446,6 +386,9 @@ def main() -> None:
         seeder.seed()
     except SafetyCheckError as e:
         logger.error(f"Safety check failed: {e}")
+        sys.exit(1)
+    except ValueError as e:
+        logger.error(f"Invalid argument: {e}")
         sys.exit(1)
     except Exception:
         logger.exception("Seeding failed")

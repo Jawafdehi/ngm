@@ -12,6 +12,7 @@ import scrapy
 import re
 import os
 import pytz
+from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
 from datetime import datetime
 from scrapy.http import FormRequest
@@ -45,27 +46,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     }
 
     def __init__(self, limit=5, *args, **kwargs):
-        """
-        Initialize spider with database connection.
-
-        Args:
-            limit: Maximum number of cases to process (default: 5)
-        """
         super().__init__(*args, **kwargs)
 
         self.limit = int(limit)
+        if self.limit <= 0:
+            raise ValueError("limit must be positive")
 
-        # Use LOCAL_DATABASE_URL for local testing, fallback to DATABASE_URL for production
         db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
-
         if not db_url:
-            raise ValueError("Neither LOCAL_DATABASE_URL nor DATABASE_URL is set")
+            raise ValueError("DATABASE_URL not set")
 
-        # Log which database we're using
-        db_type = "LOCAL" if os.getenv("LOCAL_DATABASE_URL") else "PRODUCTION"
+        # Log database type
+        db_type = "LOCAL" if os.getenv("LOCAL_DATABASE_URL") else "PROD"
         parsed = urlparse(db_url)
-        safe_url = f"{parsed.scheme}://****:****@{parsed.hostname}{parsed.path}"
-        self.logger.info(f"Using {db_type} database — {safe_url}")
+        safe_url = f"{parsed.scheme}://****@{parsed.hostname or ''}{parsed.path}"
+        self.logger.info(f"Using {db_type} database: {safe_url}")
 
         self.engine = get_engine(db_url)
         self.session = get_session(self.engine)
@@ -74,17 +69,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.successful_cases = 0
         self.failed_cases = 0
 
-        self.logger.info(f"Spider initialized (limit: {self.limit} cases)")
-
     def _get_cases_to_scrape(self):
-        """
-        Query database for cases that need order documents.
-        Returns cases with final decisions that haven't been scraped yet.
-        """
+        """Query cases with final decisions that haven't been scraped."""
         try:
             query = self.session.query(CourtCase).join(Court)
 
-            # Filter: Has final decision
+            # Has final decision
             has_decision = or_(
                 CourtCase.verdict_date_ad.isnot(None),
                 and_(
@@ -95,7 +85,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
             query = query.filter(has_decision)
 
-            # Filter: Not ongoing
+            # Not ongoing
             query = query.filter(
                 or_(
                     CourtCase.case_status.is_(None),
@@ -103,24 +93,24 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 )
             )
 
-            # Filter: Not already scraped (no orders_scraped flag and no order_document_url)
+            # Not already scraped
             query = query.filter(
                 or_(
                     CourtCase.extra_data.is_(None),
                     and_(
                         or_(
-                            CourtCase.extra_data["orders_scraped"].astext.is_(None),
-                            CourtCase.extra_data["orders_scraped"].astext != "true",
+                            CourtCase.extra_data["orders_scraped"].as_string().is_(None),
+                            CourtCase.extra_data["orders_scraped"].as_string() != "true",
                         ),
                         or_(
-                            CourtCase.extra_data["order_document_url"].astext.is_(None),
-                            CourtCase.extra_data["order_document_url"].astext == "",
+                            CourtCase.extra_data["order_document_url"].as_string().is_(None),
+                            CourtCase.extra_data["order_document_url"].as_string() == "",
                         ),
                     ),
                 )
             )
 
-            # Priority ordering: Special → Supreme → High → District
+            # Priority: Special → Supreme → High → District
             court_priority = sql_case(
                 (Court.court_type == "special", 1),
                 (Court.court_type == "supreme", 2),
@@ -129,13 +119,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 else_=5,
             )
 
-            query = query.order_by(
-                court_priority, CourtCase.registration_date_ad.asc().nullslast()
+            cases = (
+                query.order_by(court_priority, CourtCase.registration_date_ad.asc().nullslast())
+                .limit(self.limit)
+                .all()
             )
-
-            query = query.limit(self.limit)
-
-            cases = query.all()
+            
             self.logger.info(f"Found {len(cases)} cases to scrape")
             return cases
 
@@ -160,8 +149,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 self.logger.warning("No cases found to scrape")
                 return
 
-            # Extract plain data INSIDE the transaction while session is active
-            self._pending_cases = []
+            # Use deque instead of list for O(1) popleft operations
+            self._pending_cases = deque()
+            
             for case in cases:
                 try:
                     court_type, court_id = get_court_params(case.court_identifier)
@@ -177,25 +167,27 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 except Exception as e:
                     self.logger.error(f"Error preparing case {case.case_number}: {e}")
                     self.failed_cases += 1
+                    # Mark failure in database
+                    self._mark_case_failed(
+                        case_number=case.case_number,
+                        court_identifier=case.court_identifier,
+                        error_message=f"Error preparing case: {e}",
+                    )
 
         self.logger.info(f"Starting to process {self.total_cases} cases")
         yield from self._yield_next_case()
 
-    # produces a Scrapy Request for each case
     def _yield_next_case(self):
-        """Yield request for the next pending case."""
+        """Yield request for next pending case."""
         if not self._pending_cases:
             return
 
-        case_data = self._pending_cases.pop(0)  # plain dict, no ORM
+        case_data = self._pending_cases.popleft()
         yield scrapy.Request(
             url="https://supremecourt.gov.np/cp/",
             callback=self.parse,
-            meta={  # meta passes extra info
-                **case_data,
-                "handle_httpstatus_list": [301, 302],
-            },
-            dont_filter=True,  # Scrapy filters duplicate URLS,  but we may need to retry same URL
+            meta={**case_data, "handle_httpstatus_list": [301, 302]},
+            dont_filter=True,
         )
 
     def parse(self, response):
@@ -204,13 +196,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         retry_count = response.meta.get("retry_count", 0)
 
         try:
-            # Handle redirect manually so we can capture the CAPTCHA cookie
-            # before the server refreshes the session on redirect
+            # Handle redirect manually
             if response.status in (301, 302):
-                redirect_url = response.headers.get("Location", b"").decode("utf-8")
-
-                # Check if Location header is present and non-empty
-                if not redirect_url:
+                location = response.headers.get("Location")
+                
+                # Guard against missing/empty Location header
+                if not location:
                     self.logger.warning(
                         f"Redirect response with empty Location header for case {response.meta.get('case_number')}"
                     )
@@ -223,7 +214,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     yield from self._yield_next_case()
                     return
 
-                redirect_url = urljoin(response.url, redirect_url)
+                redirect_url = urljoin(response.url, location.decode("utf-8"))
 
                 captcha_from_redirect = self._extract_captcha_from_session_cookie(
                     response
@@ -282,7 +273,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     yield from self._yield_next_case()
 
         except Exception as e:
-            self.logger.error(f"Error in parse: {e}")
+            # Use logger.exception to preserve traceback
+            self.logger.exception("Error in parse")
             self.failed_cases += 1
             case_number = response.meta.get("case_number")
             court_identifier = response.meta.get("court_identifier")
@@ -291,29 +283,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 court_identifier=court_identifier,
                 error_message=str(e),
             )
-            yield from self._yield_next_case()  # dont stall the queue
+            yield from self._yield_next_case()
 
     def _extract_captcha_from_session_cookie(self, response):
-        """
-        Extract CAPTCHA answer from leaked session cookie.
-
-        WARNING: This feature is gated behind ENABLE_CAPTCHA_COOKIE_EXTRACT setting.
-        Requires documented legal/compliance approval before enabling in production.
-        """
-        # Check if the feature is enabled via settings
+        """Extract CAPTCHA from session cookie (requires ENABLE_CAPTCHA_COOKIE_EXTRACT=True)."""
         if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
-            self.logger.debug(
-                "CAPTCHA cookie extraction is disabled. "
-                "Set ENABLE_CAPTCHA_COOKIE_EXTRACT=True in settings after obtaining "
-                "legal/compliance approval to enable this feature."
-            )
             return None
-
-        self.logger.warning("CAPTCHA cookie extraction is ENABLED. ")
 
         for header in response.headers.getlist(b"Set-Cookie"):
             val = header.decode("utf-8", errors="ignore")
-
             if "court_session=" not in val:
                 continue
 
@@ -362,8 +340,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         court_identifier = response.meta.get("court_identifier")
 
         if response.status in (301, 302):
-            redirect_url = response.headers.get("Location", b"").decode("utf-8")
-            redirect_url = urljoin(response.url, redirect_url)
+            location = response.headers.get("Location")
+            
+            # Guard against missing/empty Location header
+            if not location:
+                self.logger.warning(f"[{case_number}] Redirect without Location header")
+                self.failed_cases += 1
+                self._mark_case_failed(
+                    case_number=case_number,
+                    court_identifier=court_identifier,
+                    error_message="Redirect without Location header",
+                )
+                yield from self._yield_next_case()
+                return
+            
+            redirect_url = urljoin(response.url, location.decode("utf-8"))
             self.logger.info(f"[{case_number}] POST redirected to: {redirect_url}")
             yield scrapy.Request(
                 url=redirect_url,
@@ -384,6 +375,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             if error_table:
                 error_text = error_table.get_text(strip=True)
                 self.logger.error(f"[{case_number}] Server error: {error_text}")
+                self.failed_cases += 1
                 self._mark_case_failed(
                     case_number=case_number,
                     court_identifier=court_identifier,
@@ -395,6 +387,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             # Check for no results
             if "कुनै रेकर्ड भेटिएन" in response.text:
                 self.logger.warning(f"[{case_number}] No results found")
+                self.failed_cases += 1
                 self._mark_case_failed(
                     case_number=case_number,
                     court_identifier=court_identifier,
@@ -410,6 +403,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             if not results_table:
                 self.logger.error(f"[{case_number}] Could not find results table")
+                self.failed_cases += 1
                 self._mark_case_failed(
                     case_number=case_number,
                     court_identifier=court_identifier,
@@ -421,6 +415,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             tbody = results_table.find("tbody")
             if not tbody:
                 self.logger.error(f"[{case_number}] No tbody found in results table")
+                self.failed_cases += 1
                 self._mark_case_failed(
                     case_number=case_number,
                     court_identifier=court_identifier,
@@ -432,7 +427,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             rows = tbody.find_all("tr")
             self.logger.info(f"[{case_number}] Found {len(rows)} row(s)")
 
-            found_document = False
+            # Collect all documents for this case
+            documents = []
+            
             for idx, row in enumerate(rows, 1):
                 cells = row.find_all("td")
 
@@ -448,31 +445,35 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     doc_url = urljoin(response.url, doc_link["href"])
                     self.logger.info(f"[{case_number}] Document URL: {doc_url}")
 
-                    self._save_order_info(
-                        case_number=response.meta["case_number"],
-                        court_identifier=response.meta["court_identifier"],
-                        document_url=doc_url,
-                        enrichment_data={
-                            "court": cells[0].get_text(strip=True),
-                            "registration_number": cells[1].get_text(strip=True),
-                            "case_number_from_site": cells[2].get_text(strip=True),
-                            "plaintiff": cells[3].get_text(strip=True),
-                            "defendant": cells[4].get_text(strip=True),
-                            "subject": cells[5].get_text(strip=True),
-                            "location": cells[6].get_text(strip=True),
-                            "status": cells[7].get_text(strip=True),
-                            "decision_date": cells[8].get_text(strip=True),
-                            "link_text": cells[9].get_text(strip=True),
-                        },
-                    )
-
-                    self.successful_cases += 1
-                    found_document = True
+                    # Store document info with all enrichment data
+                    documents.append({
+                        "url": doc_url,
+                        "court": cells[0].get_text(strip=True),
+                        "registration_number": cells[1].get_text(strip=True),
+                        "case_number_from_site": cells[2].get_text(strip=True),
+                        "plaintiff": cells[3].get_text(strip=True),
+                        "defendant": cells[4].get_text(strip=True),
+                        "subject": cells[5].get_text(strip=True),
+                        "location": cells[6].get_text(strip=True),
+                        "status": cells[7].get_text(strip=True),
+                        "decision_date": cells[8].get_text(strip=True),
+                        "link_text": cells[9].get_text(strip=True),
+                    })
                 else:
                     self.logger.warning(f"[{case_number}] Row {idx}: No download link")
 
-            # If no document was found in any row, mark as failed
-            if not found_document:
+            # Save all documents at once
+            if documents:
+                self._save_order_info(
+                    case_number=case_number,
+                    court_identifier=court_identifier,
+                    documents=documents,
+                )
+                # Increment success counter only once per case
+                self.successful_cases += 1
+            else:
+                # No documents found in any row
+                self.failed_cases += 1
                 self._mark_case_failed(
                     case_number=case_number,
                     court_identifier=court_identifier,
@@ -480,7 +481,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 )
 
         except Exception as e:
-            self.logger.error(f"[{case_number}] Exception: {e}", exc_info=True)
+            self.logger.exception(f"[{case_number}] Exception in parse_search_results")
+            self.failed_cases += 1
             self._mark_case_failed(
                 case_number=case_number,
                 court_identifier=court_identifier,
@@ -489,111 +491,86 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         yield from self._yield_next_case()
 
-    def _save_order_info(
-        self, case_number, court_identifier, document_url, enrichment_data=None
-    ):
-        """Save order document URL and enrichment data to database."""
+    def _save_order_info(self, case_number, court_identifier, documents):
+        """Save order documents and enrichment data."""
         try:
             with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter_by(
-                        case_number=case_number, court_identifier=court_identifier
-                    )
-                    .first()
-                )
+                case = self.session.query(CourtCase).filter_by(
+                    case_number=case_number, court_identifier=court_identifier
+                ).first()
 
-                if case:
-                    if case.extra_data is None:
-                        case.extra_data = {}
-
-                    case.extra_data["order_document_url"] = document_url
-                    case.extra_data["order_found_at"] = (
-                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                    )
-
-                    # Store all 10 table-cell fields from the website
-                    if enrichment_data:
-                        case.extra_data["enrichment_court"] = enrichment_data.get(
-                            "court"
-                        )
-                        case.extra_data["enrichment_registration_number"] = (
-                            enrichment_data.get("registration_number")
-                        )
-                        case.extra_data["enrichment_case_number"] = enrichment_data.get(
-                            "case_number_from_site"
-                        )
-                        case.extra_data["enrichment_plaintiff"] = enrichment_data.get(
-                            "plaintiff"
-                        )
-                        case.extra_data["enrichment_defendant"] = enrichment_data.get(
-                            "defendant"
-                        )
-                        case.extra_data["enrichment_subject"] = enrichment_data.get(
-                            "subject"
-                        )
-                        case.extra_data["enrichment_location"] = enrichment_data.get(
-                            "location"
-                        )
-                        case.extra_data["enrichment_status"] = enrichment_data.get(
-                            "status"
-                        )
-                        case.extra_data["enrichment_decision_date"] = (
-                            enrichment_data.get("decision_date")
-                        )
-                        case.extra_data["enrichment_link_text"] = enrichment_data.get(
-                            "link_text"
-                        )
-
-                    # Don't modify case.status - preserve enrichment state
-                    flag_modified(case, "extra_data")
-                    self.logger.info(f"Saved order info for case {case_number}")
-                else:
+                if not case:
                     self.logger.warning(f"Case not found: {case_number}")
+                    return
+
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                # Store all documents
+                case.extra_data["order_documents"] = documents
+                case.extra_data["order_document_urls"] = [doc["url"] for doc in documents]
+                case.extra_data["order_document_url"] = documents[0]["url"]  # backward compat
+                case.extra_data["order_found_at"] = datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+
+                # Store first doc enrichment for backward compat
+                first = documents[0]
+                case.extra_data.update({
+                    "enrichment_court": first.get("court"),
+                    "enrichment_registration_number": first.get("registration_number"),
+                    "enrichment_case_number": first.get("case_number_from_site"),
+                    "enrichment_plaintiff": first.get("plaintiff"),
+                    "enrichment_defendant": first.get("defendant"),
+                    "enrichment_subject": first.get("subject"),
+                    "enrichment_location": first.get("location"),
+                    "enrichment_status": first.get("status"),
+                    "enrichment_decision_date": first.get("decision_date"),
+                    "enrichment_link_text": first.get("link_text"),
+                })
+
+                # Clear failure flags
+                case.extra_data.pop("order_listing_failed", None)
+                case.extra_data.pop("order_listing_error", None)
+                case.extra_data.pop("order_listing_failed_at", None)
+
+                flag_modified(case, "extra_data")
+                self.logger.info(f"Saved {len(documents)} doc(s) for {case_number}")
 
         except Exception:
             self.logger.exception("Error saving order info")
 
     def _mark_case_failed(self, case_number, court_identifier, error_message):
-        """Mark a case as failed in the database."""
+        """Mark case as failed."""
         try:
             with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter_by(
-                        case_number=case_number, court_identifier=court_identifier
-                    )
-                    .first()
-                )
+                case = self.session.query(CourtCase).filter_by(
+                    case_number=case_number, court_identifier=court_identifier
+                ).first()
 
                 if case:
                     if case.extra_data is None:
                         case.extra_data = {}
 
-                    case.extra_data["order_listing_failed"] = True
-                    case.extra_data["order_listing_error"] = error_message
-                    case.extra_data["order_listing_failed_at"] = (
-                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                    )
+                    case.extra_data.update({
+                        "order_listing_failed": True,
+                        "order_listing_error": error_message,
+                        "order_listing_failed_at": datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat(),
+                    })
                     flag_modified(case, "extra_data")
 
         except Exception:
             self.logger.exception("Error marking case as failed")
 
     def closed(self, reason):
-        """Spider cleanup and summary logging."""
+        """Cleanup and log summary."""
         try:
             if hasattr(self, "session") and self.session:
                 self.session.close()
-
             if hasattr(self, "engine") and self.engine:
                 self.engine.dispose()
 
-            self.logger.info("=" * 60)
             self.logger.info(
-                f"Spider closed: {reason} | Total: {self.total_cases} | Success: {self.successful_cases} | Failed: {self.failed_cases}"
+                f"Spider closed: {reason} | Total: {self.total_cases} | "
+                f"Success: {self.successful_cases} | Failed: {self.failed_cases}"
             )
-            self.logger.info("=" * 60)
-
         except Exception:
             self.logger.exception("Error in cleanup")
