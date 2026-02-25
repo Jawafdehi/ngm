@@ -99,12 +99,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     CourtCase.extra_data.is_(None),
                     and_(
                         or_(
-                            CourtCase.extra_data["orders_scraped"].as_string().is_(None),
-                            CourtCase.extra_data["orders_scraped"].as_string() != "true",
+                            CourtCase.extra_data["orders_scraped"]
+                            .as_string()
+                            .is_(None),
+                            CourtCase.extra_data["orders_scraped"].as_string()
+                            != "true",
                         ),
                         or_(
-                            CourtCase.extra_data["order_document_url"].as_string().is_(None),
-                            CourtCase.extra_data["order_document_url"].as_string() == "",
+                            CourtCase.extra_data["order_document_url"]
+                            .as_string()
+                            .is_(None),
+                            CourtCase.extra_data["order_document_url"].as_string()
+                            == "",
                         ),
                     ),
                 )
@@ -120,11 +126,13 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
 
             cases = (
-                query.order_by(court_priority, CourtCase.registration_date_ad.asc().nullslast())
+                query.order_by(
+                    court_priority, CourtCase.registration_date_ad.asc().nullslast()
+                )
                 .limit(self.limit)
                 .all()
             )
-            
+
             self.logger.info(f"Found {len(cases)} cases to scrape")
             return cases
 
@@ -151,7 +159,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             # Use deque instead of list for O(1) popleft operations
             self._pending_cases = deque()
-            
+
             for case in cases:
                 try:
                     court_type, court_id = get_court_params(case.court_identifier)
@@ -199,7 +207,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             # Handle redirect manually
             if response.status in (301, 302):
                 location = response.headers.get("Location")
-                
+
                 # Guard against missing/empty Location header
                 if not location:
                     self.logger.warning(
@@ -341,7 +349,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if response.status in (301, 302):
             location = response.headers.get("Location")
-            
+
             # Guard against missing/empty Location header
             if not location:
                 self.logger.warning(f"[{case_number}] Redirect without Location header")
@@ -353,7 +361,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 )
                 yield from self._yield_next_case()
                 return
-            
+
             redirect_url = urljoin(response.url, location.decode("utf-8"))
             self.logger.info(f"[{case_number}] POST redirected to: {redirect_url}")
             yield scrapy.Request(
@@ -429,7 +437,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             # Collect all documents for this case
             documents = []
-            
+
             for idx, row in enumerate(rows, 1):
                 cells = row.find_all("td")
 
@@ -446,19 +454,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     self.logger.info(f"[{case_number}] Document URL: {doc_url}")
 
                     # Store document info with all enrichment data
-                    documents.append({
-                        "url": doc_url,
-                        "court": cells[0].get_text(strip=True),
-                        "registration_number": cells[1].get_text(strip=True),
-                        "case_number_from_site": cells[2].get_text(strip=True),
-                        "plaintiff": cells[3].get_text(strip=True),
-                        "defendant": cells[4].get_text(strip=True),
-                        "subject": cells[5].get_text(strip=True),
-                        "location": cells[6].get_text(strip=True),
-                        "status": cells[7].get_text(strip=True),
-                        "decision_date": cells[8].get_text(strip=True),
-                        "link_text": cells[9].get_text(strip=True),
-                    })
+                    documents.append(
+                        {
+                            "url": doc_url,
+                            "court": cells[0].get_text(strip=True),
+                            "registration_number": cells[1].get_text(strip=True),
+                            "case_number_from_site": cells[2].get_text(strip=True),
+                            "plaintiff": cells[3].get_text(strip=True),
+                            "defendant": cells[4].get_text(strip=True),
+                            "subject": cells[5].get_text(strip=True),
+                            "location": cells[6].get_text(strip=True),
+                            "status": cells[7].get_text(strip=True),
+                            "decision_date": cells[8].get_text(strip=True),
+                            "link_text": cells[9].get_text(strip=True),
+                        }
+                    )
                 else:
                     self.logger.warning(f"[{case_number}] Row {idx}: No download link")
 
@@ -495,9 +505,13 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """Save order documents and enrichment data."""
         try:
             with self.session.begin():
-                case = self.session.query(CourtCase).filter_by(
-                    case_number=case_number, court_identifier=court_identifier
-                ).first()
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
 
                 if not case:
                     self.logger.warning(f"Case not found: {case_number}")
@@ -508,24 +522,34 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
                 # Store all documents
                 case.extra_data["order_documents"] = documents
-                case.extra_data["order_document_urls"] = [doc["url"] for doc in documents]
-                case.extra_data["order_document_url"] = documents[0]["url"]  # backward compat
-                case.extra_data["order_found_at"] = datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                case.extra_data["order_document_urls"] = [
+                    doc["url"] for doc in documents
+                ]
+                case.extra_data["order_document_url"] = documents[0][
+                    "url"
+                ]  # backward compat
+                case.extra_data["order_found_at"] = (
+                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                )
 
                 # Store first doc enrichment for backward compat
                 first = documents[0]
-                case.extra_data.update({
-                    "enrichment_court": first.get("court"),
-                    "enrichment_registration_number": first.get("registration_number"),
-                    "enrichment_case_number": first.get("case_number_from_site"),
-                    "enrichment_plaintiff": first.get("plaintiff"),
-                    "enrichment_defendant": first.get("defendant"),
-                    "enrichment_subject": first.get("subject"),
-                    "enrichment_location": first.get("location"),
-                    "enrichment_status": first.get("status"),
-                    "enrichment_decision_date": first.get("decision_date"),
-                    "enrichment_link_text": first.get("link_text"),
-                })
+                case.extra_data.update(
+                    {
+                        "enrichment_court": first.get("court"),
+                        "enrichment_registration_number": first.get(
+                            "registration_number"
+                        ),
+                        "enrichment_case_number": first.get("case_number_from_site"),
+                        "enrichment_plaintiff": first.get("plaintiff"),
+                        "enrichment_defendant": first.get("defendant"),
+                        "enrichment_subject": first.get("subject"),
+                        "enrichment_location": first.get("location"),
+                        "enrichment_status": first.get("status"),
+                        "enrichment_decision_date": first.get("decision_date"),
+                        "enrichment_link_text": first.get("link_text"),
+                    }
+                )
 
                 # Clear failure flags
                 case.extra_data.pop("order_listing_failed", None)
@@ -542,19 +566,27 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """Mark case as failed."""
         try:
             with self.session.begin():
-                case = self.session.query(CourtCase).filter_by(
-                    case_number=case_number, court_identifier=court_identifier
-                ).first()
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
 
                 if case:
                     if case.extra_data is None:
                         case.extra_data = {}
 
-                    case.extra_data.update({
-                        "order_listing_failed": True,
-                        "order_listing_error": error_message,
-                        "order_listing_failed_at": datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat(),
-                    })
+                    case.extra_data.update(
+                        {
+                            "order_listing_failed": True,
+                            "order_listing_error": error_message,
+                            "order_listing_failed_at": datetime.now(KATHMANDU_TZ)
+                            .replace(tzinfo=None)
+                            .isoformat(),
+                        }
+                    )
                     flag_modified(case, "extra_data")
 
         except Exception:

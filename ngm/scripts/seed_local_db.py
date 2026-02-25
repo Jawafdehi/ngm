@@ -67,7 +67,9 @@ class DatabaseSeeder:
 
     def _validate_urls(self) -> None:
         """Validate prod and local URLs are different."""
-        if self._get_db_identity(self.prod_url) == self._get_db_identity(self.local_url):
+        if self._get_db_identity(self.prod_url) == self._get_db_identity(
+            self.local_url
+        ):
             raise SafetyCheckError("Prod and local URLs are the same. Aborting.")
 
     @staticmethod
@@ -248,7 +250,9 @@ class DatabaseSeeder:
 
     def seed(self) -> None:
         """Execute seeding process."""
-        logger.info(f"Seeding from {self._mask_url(self.prod_url)} to {self._mask_url(self.local_url)}")
+        logger.info(
+            f"Seeding from {self._mask_url(self.prod_url)} to {self._mask_url(self.local_url)}"
+        )
         logger.info(f"Limit: {self.cases_limit} cases")
 
         try:
@@ -373,12 +377,12 @@ def validate_environment() -> Tuple[str, str]:
 def main() -> None:
     """Main entry point for the seeding script."""
     args = parse_arguments()
-    
+
     # Validate limit is positive
     if args.limit <= 0:
         logger.error("--limit must be a positive integer")
         sys.exit(1)
-    
+
     prod_url, local_url = validate_environment()
 
     try:
