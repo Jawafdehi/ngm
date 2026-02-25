@@ -1,86 +1,164 @@
 """
 Seed local database with data from production database.
+
+This script safely copies courts, cases, and hearings from a production database
+to a local development database. It includes safety checks to prevent accidental
+writes to production.
+
 Usage:
-    export DATABASE_URL=''
-    export LOCAL_DATABASE_URL=''
+    export DATABASE_URL='postgresql://user:pass@host:5432/prod_db'
+    export LOCAL_DATABASE_URL='postgresql://user:pass@localhost:5433/local_db'
     poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
 
-Or with custom limit:
+    # Custom limit
     poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
 """
 
+import argparse
+import logging
 import os
 import sys
-import argparse
+from typing import Tuple
 from urllib.parse import urlparse
+
 from ngm.database.models import (
-    get_engine,
-    get_session,
-    init_db,
     Court,
     CourtCase,
     CourtCaseHearing,
+    get_engine,
+    get_session,
+    init_db,
 )
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
-def reset_engine_singleton():
-    """Reset the global engine singleton to allow multiple connections."""
-    import ngm.database.models as models
 
-    models._engine = None
-    models._engine_url = None
+class SafetyCheckError(Exception):
+    """Raised when database safety checks fail to prevent accidental production writes."""
+
+    pass
 
 
-def seed_database(prod_url, local_url, cases_limit=200):
-    """
-    Seed local database with production data.
+class DatabaseSeeder:
+    """Handles seeding of local database from production."""
 
-    Args:
-        prod_url: Production database URL (read-only)
-        local_url: Local database URL (read-write)
-        cases_limit: Number of cases to seed (default: 200)
-    """
+    def __init__(self, prod_url: str, local_url: str, cases_limit: int = 200):
+        """
+        Initialize database seeder.
 
-    # Prevent accidental production writes
-    def _db_identity(url: str):
+        Args:
+            prod_url: Production database connection URL (read-only)
+            local_url: Local database connection URL (read-write)
+            cases_limit: Maximum number of cases to seed
+
+        Raises:
+            SafetyCheckError: If prod_url and local_url point to the same database
+        """
+        self.prod_url = prod_url
+        self.local_url = local_url
+        self.cases_limit = cases_limit
+
+        self._validate_urls()
+
+        self.prod_engine = None
+        self.prod_session = None
+        self.local_engine = None
+        self.local_session = None
+
+        self.stats = {"courts": 0, "cases": 0, "hearings": 0}
+
+    def _validate_urls(self) -> None:
+        """
+        Validate that production and local URLs are different.
+
+        Raises:
+            SafetyCheckError: If URLs point to the same database
+        """
+        if self._get_db_identity(self.prod_url) == self._get_db_identity(
+            self.local_url
+        ):
+            raise SafetyCheckError(
+                "Production and local database URLs point to the same database. "
+                "Aborting to prevent accidental production writes."
+            )
+
+    @staticmethod
+    def _get_db_identity(url: str) -> Tuple[str, int | None, str]:
+        """
+        Extract normalized database identity from connection URL.
+
+        Args:
+            url: Database connection URL
+
+        Returns:
+            Tuple of (hostname, port, database_path) where port may be None
+        """
         parsed = urlparse(url)
-        return (parsed.hostname, parsed.port, parsed.path)
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
 
-    if _db_identity(prod_url) == _db_identity(local_url):
-        raise ValueError(
-            "SAFETY CHECK FAILED: LOCAL_DATABASE_URL points to the same database as DATABASE_URL. "
-            "Aborting to prevent accidental production writes."
-        )
+        # Normalize port with scheme defaults
+        port = parsed.port
+        if port is None:
+            default_ports = {"postgresql": 5432, "postgres": 5432, "mysql": 3306}
+            port = default_ports.get(scheme)
 
-    print("=" * 60)
-    print("NGM Database Seeding")
-    print("=" * 60)
-    print(f"\nProduction DB: {prod_url.split('@')[1] if '@' in prod_url else prod_url}")
-    print(
-        f"Local DB:      {local_url.split('@')[1] if '@' in local_url else local_url}"
-    )
-    print(f"Cases limit:   {cases_limit}\n")
+        port = int(port) if port is not None else None
 
-    # ── Connect to production DB ──────────────────────────────────────────
-    print("Connecting to production database...")
-    prod_engine = get_engine(prod_url)
-    prod_session = get_session(prod_engine)
-    print(" Connected to production")
+        # Normalize path
+        path = (parsed.path or "").rstrip("/")
 
-    # ── Connect to local DB ───────────────────────────────────────────────
-    print("Connecting to local database...")
-    reset_engine_singleton()
-    local_engine = get_engine(local_url)
-    init_db(local_engine)
-    local_session = get_session(local_engine)
-    print(" Connected to local")
-    print()
+        return (hostname, port, path)
 
-    # ── Seed Courts ───────────────────────────────────────────────────────
-    print("Seeding courts...")
-    try:
-        with prod_session.begin():
-            courts = prod_session.query(Court).all()
+    def _connect_databases(self) -> None:
+        """Establish connections to production and local databases."""
+        logger.info("Connecting to production database...")
+        self.prod_engine = get_engine(self.prod_url)
+        self.prod_session = get_session(self.prod_engine)
+        logger.info("Connected to production database")
+
+        logger.info("Connecting to local database...")
+        self._reset_engine_singleton()
+        self.local_engine = get_engine(self.local_url)
+        init_db(self.local_engine)
+        self.local_session = get_session(self.local_engine)
+        logger.info("Connected to local database")
+
+    @staticmethod
+    def _reset_engine_singleton() -> None:
+        """Reset the global engine singleton to allow multiple connections."""
+        import ngm.database.models as models
+
+        models._engine = None
+        models._engine_url = None
+
+    def _cleanup(self) -> None:
+        """Close database connections and dispose engines."""
+        logger.info("Cleaning up database connections...")
+
+        if self.prod_session:
+            self.prod_session.close()
+        if self.local_session:
+            self.local_session.close()
+        if self.prod_engine:
+            self.prod_engine.dispose()
+        if self.local_engine:
+            self.local_engine.dispose()
+
+        logger.info("Cleanup complete")
+
+    def _seed_courts(self) -> None:
+        """Seed all courts from production to local database."""
+        logger.info("Seeding courts...")
+
+        with self.prod_session.begin():
+            courts = self.prod_session.query(Court).all()
             court_data = [
                 {
                     "identifier": c.identifier,
@@ -91,25 +169,31 @@ def seed_database(prod_url, local_url, cases_limit=200):
                 for c in courts
             ]
 
-        with local_session.begin():
-            for c in court_data:
-                local_session.merge(Court(**c))
+        with self.local_session.begin():
+            for court in court_data:
+                self.local_session.merge(Court(**court))
 
-        print(f"   Seeded {len(court_data)} courts")
-    except Exception as e:
-        print(f"  ✗ Error seeding courts: {e}")
-        raise
+        self.stats["courts"] = len(court_data)
+        logger.info(f"Seeded {len(court_data)} courts")
 
-    # ── Seed Cases ────────────────────────────────────────────────────────
-    print("\nSeeding cases (special court with verdicts)...")
-    try:
-        with prod_session.begin():
+    def _seed_cases(self) -> list:
+        """
+        Seed cases from production to local database.
+
+        Returns:
+            List of case data dictionaries for use in seeding hearings
+        """
+        logger.info(
+            f"Seeding cases (special court with verdicts, limit: {self.cases_limit})..."
+        )
+
+        with self.prod_session.begin():
             cases = (
-                prod_session.query(CourtCase)
+                self.prod_session.query(CourtCase)
                 .filter(CourtCase.court_identifier == "special")
                 .filter(CourtCase.case_status.like("%फैसला%"))
                 .order_by(CourtCase.registration_date_bs.desc())
-                .limit(cases_limit)
+                .limit(self.cases_limit)
                 .all()
             )
 
@@ -139,23 +223,29 @@ def seed_database(prod_url, local_url, cases_limit=200):
                 for c in cases
             ]
 
-        with local_session.begin():
-            for c in case_data:
-                local_session.merge(CourtCase(**c))
+        with self.local_session.begin():
+            for case in case_data:
+                self.local_session.merge(CourtCase(**case))
 
-        print(f"   Seeded {len(case_data)} cases")
-    except Exception as e:
-        print(f"  ✗ Error seeding cases: {e}")
-        raise
+        self.stats["cases"] = len(case_data)
+        logger.info(f"Seeded {len(case_data)} cases")
 
-    # ── Seed Hearings ─────────────────────────────────────────────────────
-    print("\nSeeding hearings...")
-    try:
+        return case_data
+
+    def _seed_hearings(self, case_data: list) -> None:
+        """
+        Seed hearings for the given cases.
+
+        Args:
+            case_data: List of case dictionaries containing case_number
+        """
+        logger.info("Seeding hearings...")
+
         case_numbers = [c["case_number"] for c in case_data]
 
-        with prod_session.begin():
+        with self.prod_session.begin():
             hearings = (
-                prod_session.query(CourtCaseHearing)
+                self.prod_session.query(CourtCaseHearing)
                 .filter(CourtCaseHearing.case_number.in_(case_numbers))
                 .filter(CourtCaseHearing.court_identifier == "special")
                 .all()
@@ -163,6 +253,7 @@ def seed_database(prod_url, local_url, cases_limit=200):
 
             hearing_data = [
                 {
+                    "id": h.id,
                     "case_number": h.case_number,
                     "court_identifier": h.court_identifier,
                     "hearing_date_bs": h.hearing_date_bs,
@@ -181,81 +272,148 @@ def seed_database(prod_url, local_url, cases_limit=200):
                 for h in hearings
             ]
 
-        with local_session.begin():
-            for h in hearing_data:
-                local_session.merge(CourtCaseHearing(**h))
+        with self.local_session.begin():
+            for hearing in hearing_data:
+                self.local_session.merge(CourtCaseHearing(**hearing))
 
-        print(f"   Seeded {len(hearing_data)} hearings")
-    except Exception as e:
-        print(f"  ✗ Error seeding hearings: {e}")
-        raise
+        self.stats["hearings"] = len(hearing_data)
+        logger.info(f"Seeded {len(hearing_data)} hearings")
 
-    # ── Cleanup ───────────────────────────────────────────────────────────
-    print("\nCleaning up connections...")
-    prod_session.close()
-    local_session.close()
-    prod_engine.dispose()
-    local_engine.dispose()
+    def seed(self) -> None:
+        """
+        Execute the complete seeding process.
 
-    print()
-    print("=" * 60)
-    print(" Done! Local database seeded successfully.")
-    print("=" * 60)
-    print()
-    print("Summary:")
-    print(f"  - Courts: {len(court_data)}")
-    print(f"  - Cases: {len(case_data)}")
-    print(f"  - Hearings: {len(hearing_data)}")
-    print()
+        Raises:
+            Exception: If any step of the seeding process fails
+        """
+        logger.info("=" * 60)
+        logger.info("NGM Database Seeding")
+        logger.info("=" * 60)
+        logger.info(f"Production: {self._mask_url(self.prod_url)}")
+        logger.info(f"Local:      {self._mask_url(self.local_url)}")
+        logger.info(f"Limit:      {self.cases_limit} cases")
+        logger.info("=" * 60)
+
+        try:
+            self._connect_databases()
+
+            self._seed_courts()
+            case_data = self._seed_cases()
+            self._seed_hearings(case_data)
+
+            logger.info("=" * 60)
+            logger.info("Seeding completed successfully")
+            logger.info("=" * 60)
+            logger.info("Summary:")
+            logger.info(f"  Courts:   {self.stats['courts']}")
+            logger.info(f"  Cases:    {self.stats['cases']}")
+            logger.info(f"  Hearings: {self.stats['hearings']}")
+            logger.info("=" * 60)
+
+        finally:
+            self._cleanup()
+
+    @staticmethod
+    def _mask_url(url: str) -> str:
+        """
+        Mask sensitive information in database URL.
+
+        Args:
+            url: Database connection URL
+
+        Returns:
+            Masked URL with credentials hidden
+        """
+        if "@" in url:
+            return url.split("@")[1]
+        return url
 
 
-def main():
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Returns:
+        Parsed arguments namespace
+    """
     parser = argparse.ArgumentParser(
-        description="Seed local database with production data"
+        description="Seed local database with production data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Seed with default limit (200 cases)
+  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
+
+  # Seed with custom limit
+  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
+
+Environment Variables:
+  DATABASE_URL        Production database connection URL (required)
+  LOCAL_DATABASE_URL  Local database connection URL (required)
+        """,
     )
+
     parser.add_argument(
-        "--limit", type=int, default=200, help="Number of cases to seed (default: 200)"
+        "--limit",
+        type=int,
+        default=200,
+        help="Number of cases to seed (default: 200)",
     )
+
     parser.add_argument(
         "--confirm-prod-seed",
         action="store_true",
+        required=True,
         help="Acknowledge that production data will be copied locally (required)",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def validate_environment() -> Tuple[str, str]:
+    """
+    Validate required environment variables are set.
+
+    Returns:
+        Tuple of (prod_url, local_url)
+
+    Raises:
+        SystemExit: If required environment variables are missing
+    """
     prod_url = os.getenv("DATABASE_URL")
     local_url = os.getenv("LOCAL_DATABASE_URL")
 
     if not prod_url or not local_url:
-        print("ERROR: Both DATABASE_URL and LOCAL_DATABASE_URL must be set")
-        print()
-        print("Example:")
-        print(
-            "export DATABASE_URL='postgresql://<user>:<password>@<host>:5432/<dbname>'"
+        logger.error("Missing required environment variables")
+        logger.error("")
+        logger.error("Both DATABASE_URL and LOCAL_DATABASE_URL must be set:")
+        logger.error("  export DATABASE_URL='postgresql://user:pass@host:5432/prod_db'")
+        logger.error(
+            "  export LOCAL_DATABASE_URL='postgresql://user:pass@localhost:5433/local_db'"
         )
-        print(
-            "export LOCAL_DATABASE_URL='postgresql://<user>:<password>@localhost:5433/<dbname>'"
+        logger.error("")
+        logger.error("Then run:")
+        logger.error(
+            "  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed"
         )
-        print("poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed")
         sys.exit(1)
 
-    if not args.confirm_prod_seed:
-        print(
-            "ERROR: Refusing to seed from production without --confirm-prod-seed flag"
-        )
-        print(
-            "This is a safety measure to prevent accidental copying of production data."
-        )
-        print()
-        print("To proceed, run:")
-        print("poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed")
-        sys.exit(1)
+    return prod_url, local_url
+
+
+def main() -> None:
+    """Main entry point for the seeding script."""
+    args = parse_arguments()
+    prod_url, local_url = validate_environment()
 
     try:
-        seed_database(prod_url, local_url, args.limit)
+        seeder = DatabaseSeeder(prod_url, local_url, args.limit)
+        seeder.seed()
+    except SafetyCheckError as e:
+        logger.error(f"Safety check failed: {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"\nSeeding failed: {e}")
+        logger.exception(f"Seeding failed: {e}")
         sys.exit(1)
 
 
