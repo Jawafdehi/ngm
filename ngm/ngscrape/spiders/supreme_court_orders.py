@@ -27,9 +27,9 @@ KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
 class SupremeCourtOrdersSpider(scrapy.Spider):
     name = "supreme_court_orders"
-    allowed_domains = ["supremecourt.gov.np"]
+    allowed_domains = ("supremecourt.gov.np",)
 
-    custom_settings = {
+    custom_settings = {  # noqa: RUF012
         "CONCURRENT_REQUESTS": 1,
         "DOWNLOAD_DELAY": 3,  # delay between requests
         "DOWNLOAD_TIMEOUT": 60,
@@ -76,9 +76,6 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         self.logger.info(f"Spider initialized (limit: {self.limit} cases)")
 
-    def start(self):
-        return super().start()
-
     def _get_cases_to_scrape(self):
         """
         Query database for cases that need order documents.
@@ -106,12 +103,20 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 )
             )
 
-            # Filter: Not already scraped
+            # Filter: Not already scraped (no orders_scraped flag and no order_document_url)
             query = query.filter(
                 or_(
                     CourtCase.extra_data.is_(None),
-                    CourtCase.extra_data["orders_scraped"].astext.is_(None),
-                    CourtCase.extra_data["orders_scraped"].astext != "true",
+                    and_(
+                        or_(
+                            CourtCase.extra_data["orders_scraped"].astext.is_(None),
+                            CourtCase.extra_data["orders_scraped"].astext != "true",
+                        ),
+                        or_(
+                            CourtCase.extra_data["order_document_url"].astext.is_(None),
+                            CourtCase.extra_data["order_document_url"].astext == "",
+                        ),
+                    ),
                 )
             )
 
@@ -134,8 +139,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             self.logger.info(f"Found {len(cases)} cases to scrape")
             return cases
 
-        except Exception as e:
-            self.logger.exception(f"Error querying cases: {e}")
+        except Exception:
+            self.logger.exception("Error querying cases")
             return []
 
     def start_requests(self):
@@ -188,7 +193,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             callback=self.parse,
             meta={  # meta passes extra info
                 **case_data,
-                "handle_httpstatus_list": [302],
+                "handle_httpstatus_list": [301, 302],
             },
             dont_filter=True,  # Scrapy filters duplicate URLS,  but we may need to retry same URL
         )
@@ -203,6 +208,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             # before the server refreshes the session on redirect
             if response.status in (301, 302):
                 redirect_url = response.headers.get("Location", b"").decode("utf-8")
+
+                # Check if Location header is present and non-empty
+                if not redirect_url:
+                    self.logger.warning(
+                        f"Redirect response with empty Location header for case {response.meta.get('case_number')}"
+                    )
+                    self.failed_cases += 1
+                    self._mark_case_failed(
+                        case_number=response.meta.get("case_number"),
+                        court_identifier=response.meta.get("court_identifier"),
+                        error_message="Redirect with empty Location header",
+                    )
+                    yield from self._yield_next_case()
+                    return
+
                 redirect_url = urljoin(response.url, redirect_url)
 
                 captcha_from_redirect = self._extract_captcha_from_session_cookie(
@@ -218,7 +238,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     callback=self.parse,
                     meta={
                         **meta,
-                        "handle_httpstatus_list": [302],
+                        "handle_httpstatus_list": [301, 302],
                     },
                     dont_filter=True,
                 )
@@ -331,7 +351,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             },
             meta={
                 **response.meta,
-                "handle_httpstatus_list": [302],
+                "handle_httpstatus_list": [301, 302],
             },
             dont_filter=True,
         )
@@ -341,7 +361,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         case_number = response.meta.get("case_number")
         court_identifier = response.meta.get("court_identifier")
 
-        if response.status == 302:
+        if response.status in (301, 302):
             redirect_url = response.headers.get("Location", b"").decode("utf-8")
             redirect_url = urljoin(response.url, redirect_url)
             self.logger.info(f"[{case_number}] POST redirected to: {redirect_url}")
@@ -350,7 +370,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 callback=self.parse_search_results,
                 meta={
                     **response.meta,
-                    "handle_httpstatus_list": [302],
+                    "handle_httpstatus_list": [301, 302],
                 },
                 dont_filter=True,
             )
@@ -525,14 +545,14 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                             "link_text"
                         )
 
-                    case.status = "pending"
+                    # Don't modify case.status - preserve enrichment state
                     flag_modified(case, "extra_data")
                     self.logger.info(f"Saved order info for case {case_number}")
                 else:
                     self.logger.warning(f"Case not found: {case_number}")
 
-        except Exception as e:
-            self.logger.exception(f"Error saving order info: {e}")
+        except Exception:
+            self.logger.exception("Error saving order info")
 
     def _mark_case_failed(self, case_number, court_identifier, error_message):
         """Mark a case as failed in the database."""
@@ -557,8 +577,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     )
                     flag_modified(case, "extra_data")
 
-        except Exception as e:
-            self.logger.exception(f"Error marking case as failed: {e}")
+        except Exception:
+            self.logger.exception("Error marking case as failed")
 
     def closed(self, reason):
         """Spider cleanup and summary logging."""
@@ -575,5 +595,5 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
             self.logger.info("=" * 60)
 
-        except Exception as e:
-            self.logger.exception(f"Error in cleanup: {e}")
+        except Exception:
+            self.logger.exception("Error in cleanup")

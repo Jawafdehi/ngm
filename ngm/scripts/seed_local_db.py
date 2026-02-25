@@ -100,7 +100,8 @@ class DatabaseSeeder:
             Tuple of (hostname, port, database_path) where port may be None
         """
         parsed = urlparse(url)
-        scheme = (parsed.scheme or "").lower()
+        # Strip dialect suffix (e.g., postgresql+psycopg2 -> postgresql)
+        scheme = (parsed.scheme or "").lower().split("+", 1)[0]
         hostname = (parsed.hostname or "").lower()
 
         # Normalize port with scheme defaults
@@ -142,14 +143,30 @@ class DatabaseSeeder:
         """Close database connections and dispose engines."""
         logger.info("Cleaning up database connections...")
 
-        if self.prod_session:
-            self.prod_session.close()
-        if self.local_session:
-            self.local_session.close()
-        if self.prod_engine:
-            self.prod_engine.dispose()
-        if self.local_engine:
-            self.local_engine.dispose()
+        # Close each resource independently to ensure all cleanup attempts are made
+        try:
+            if self.prod_session:
+                self.prod_session.close()
+        except Exception as e:
+            logger.error(f"Error closing prod_session: {e}")
+
+        try:
+            if self.local_session:
+                self.local_session.close()
+        except Exception as e:
+            logger.error(f"Error closing local_session: {e}")
+
+        try:
+            if self.prod_engine:
+                self.prod_engine.dispose()
+        except Exception as e:
+            logger.error(f"Error disposing prod_engine: {e}")
+
+        try:
+            if self.local_engine:
+                self.local_engine.dispose()
+        except Exception as e:
+            logger.error(f"Error disposing local_engine: {e}")
 
         logger.info("Cleanup complete")
 
@@ -324,8 +341,26 @@ class DatabaseSeeder:
         Returns:
             Masked URL with credentials hidden
         """
-        if "@" in url:
-            return url.split("@")[1]
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(url)
+        if parsed.username or parsed.password:
+            # Rebuild netloc with masked credentials
+            masked_netloc = f"{parsed.username or ''}:****@{parsed.hostname}"
+            if parsed.port:
+                masked_netloc += f":{parsed.port}"
+
+            # Reconstruct URL with masked netloc
+            return urlunparse(
+                (
+                    parsed.scheme,
+                    masked_netloc,
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
         return url
 
 
@@ -412,8 +447,8 @@ def main() -> None:
     except SafetyCheckError as e:
         logger.error(f"Safety check failed: {e}")
         sys.exit(1)
-    except Exception as e:
-        logger.exception(f"Seeding failed: {e}")
+    except Exception:
+        logger.exception("Seeding failed")
         sys.exit(1)
 
 
