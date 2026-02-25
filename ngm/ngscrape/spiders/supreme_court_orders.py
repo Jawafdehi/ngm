@@ -159,6 +159,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             # Use deque instead of list for O(1) popleft operations
             self._pending_cases = deque()
+            failed_preparations = []
 
             for case in cases:
                 try:
@@ -175,12 +176,17 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 except Exception as e:
                     self.logger.error(f"Error preparing case {case.case_number}: {e}")
                     self.failed_cases += 1
-                    # Mark failure in database
-                    self._mark_case_failed(
-                        case_number=case.case_number,
-                        court_identifier=case.court_identifier,
-                        error_message=f"Error preparing case: {e}",
+                    failed_preparations.append(
+                        {
+                            "case_number": case.case_number,
+                            "court_identifier": case.court_identifier,
+                            "error_message": f"Error preparing case: {e}",
+                        }
                     )
+
+        # Mark failures outside the transaction to avoid nested Session.begin()
+        for failure in failed_preparations:
+            self._mark_case_failed(**failure)
 
         self.logger.info(f"Starting to process {self.total_cases} cases")
         yield from self._yield_next_case()
@@ -474,13 +480,20 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             # Save all documents at once
             if documents:
-                self._save_order_info(
+                saved = self._save_order_info(
                     case_number=case_number,
                     court_identifier=court_identifier,
                     documents=documents,
                 )
-                # Increment success counter only once per case
-                self.successful_cases += 1
+                if saved:
+                    self.successful_cases += 1
+                else:
+                    self.failed_cases += 1
+                    self._mark_case_failed(
+                        case_number=case_number,
+                        court_identifier=court_identifier,
+                        error_message="Failed to persist order info",
+                    )
             else:
                 # No documents found in any row
                 self.failed_cases += 1
@@ -501,8 +514,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         yield from self._yield_next_case()
 
-    def _save_order_info(self, case_number, court_identifier, documents):
-        """Save order documents and enrichment data."""
+    def _save_order_info(self, case_number, court_identifier, documents) -> bool:
+        """Save order documents and enrichment data. Returns True on success."""
         try:
             with self.session.begin():
                 case = (
@@ -515,7 +528,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
                 if not case:
                     self.logger.warning(f"Case not found: {case_number}")
-                    return
+                    return False
 
                 if case.extra_data is None:
                     case.extra_data = {}
@@ -558,9 +571,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
                 flag_modified(case, "extra_data")
                 self.logger.info(f"Saved {len(documents)} doc(s) for {case_number}")
+                return True
 
         except Exception:
             self.logger.exception("Error saving order info")
+            return False
 
     def _mark_case_failed(self, case_number, court_identifier, error_message):
         """Mark case as failed."""
