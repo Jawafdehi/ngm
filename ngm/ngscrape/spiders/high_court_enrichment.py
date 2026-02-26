@@ -1,23 +1,24 @@
-"""
-High Court Case Enrichment Spider
+"""High Court Case Enrichment Spider.
 
 Enriches existing high court cases with detailed information from case detail pages.
 Processes cases from all 18 high courts that have status='pending' or status=NULL.
 """
 
 import os
-import scrapy
 from datetime import datetime
-from typing import List, Dict
-from scrapy.http import FormRequest
-from bs4 import BeautifulSoup
+from typing import Dict, List
+
 import pytz
+import scrapy
+from bs4 import BeautifulSoup
+from scrapy.http import FormRequest
 from sqlalchemy import and_
 from sqlalchemy.orm.attributes import flag_modified
-from ngm.utils.normalizer import normalize_whitespace, normalize_date
+
+from ngm.database.models import CaseEntity, CourtCase, get_engine, get_session, init_db
 from ngm.utils.court_ids import HIGH_COURTS
-from ngm.database.models import get_engine, get_session, init_db, CourtCase, CaseEntity
 from ngm.utils.db_helpers import convert_bs_to_ad
+from ngm.utils.normalizer import normalize_date, normalize_whitespace
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
@@ -36,7 +37,15 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
         super().__init__(*args, **kwargs)
 
         court_identifiers = [c["identifier"] for c in HIGH_COURTS]
-        self.courts = [court] if court in court_identifiers else court_identifiers
+
+        # Validate court identifier if provided
+        if court is not None and court not in court_identifiers:
+            raise ValueError(
+                f"Invalid court identifier: {court}. "
+                f"Valid identifiers are: {', '.join(court_identifiers)}"
+            )
+
+        self.courts = [court] if court else court_identifiers
 
         self.success_count = 0
         self.failed_count = 0
@@ -49,27 +58,38 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             self.logger.error("No database URL found")
             return
 
-        self.engine = get_engine(db_url)
-        init_db(self.engine)
-        self.session = get_session(self.engine)
+        try:
+            self.engine = get_engine(db_url)
+            init_db(self.engine)
+            self.session = get_session(self.engine)
 
-        cases = self._fetch_cases()
-        if not cases:
-            self.logger.info("No cases to enrich")
-            return
+            cases = self._fetch_cases()
+            if not cases:
+                self.logger.info("No cases to enrich")
+                return
 
-        for case_number, court_identifier in cases:
-            url = f"https://supremecourt.gov.np/court/{court_identifier}/case_details"
+            for case_number, court_identifier in cases:
+                url = (
+                    f"https://supremecourt.gov.np/court/{court_identifier}/case_details"
+                )
 
-            yield FormRequest(
-                url=url,
-                method="POST",
-                formdata={"case_no": case_number},
-                callback=self.parse_case_detail,
-                meta={"court_identifier": court_identifier, "case_number": case_number},
-                dont_filter=True,
-                errback=self.handle_error,
-            )
+                yield FormRequest(
+                    url=url,
+                    method="POST",
+                    formdata={"case_no": case_number},
+                    callback=self.parse_case_detail,
+                    meta={
+                        "court_identifier": court_identifier,
+                        "case_number": case_number,
+                    },
+                    dont_filter=True,
+                    errback=self.handle_error,
+                )
+        except Exception:
+            # Ensure session cleanup on error
+            if hasattr(self, "session") and self.session:
+                self.session.close()
+            raise
 
     def _fetch_cases(self):
         with self.session.begin():
@@ -128,7 +148,7 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             self._mark_as_failed(case_number, court_identifier)
             return
 
-        self._save_enrichment(
+        success = self._save_enrichment(
             case_number,
             court_identifier,
             enrichment_result["core_fields"],
@@ -138,8 +158,9 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             response.url,
         )
 
-        self.success_count += 1
-        self.logger.info(f"Successfully enriched {case_number}")
+        if success:
+            self.success_count += 1
+            self.logger.info(f"Successfully enriched {case_number}")
 
     def _extract_enrichment_data(self, soup: BeautifulSoup) -> Dict:
         core_fields = {}
@@ -174,7 +195,10 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                         normalize_date(value)
                     )
                 except Exception:
-                    pass
+                    self.logger.exception(
+                        f"Failed to convert registration_date_bs to AD: "
+                        f"value={value}, label={label}, field=registration_date_ad"
+                    )
             elif label == "मुद्दाको किसिम":
                 core_fields["case_type"] = value[:200]
                 extra_data["case_type_display"] = value
@@ -189,7 +213,10 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                             normalize_date(value)
                         )
                     except Exception:
-                        pass
+                        self.logger.exception(
+                            f"Failed to convert verdict_date_bs to AD: "
+                            f"value={value}, label={label}, field=verdict_date_ad"
+                        )
             elif label == "फैसला गर्ने न्यायाधीश":
                 core_fields["verdict_judge"] = value[:500]
 
@@ -280,86 +307,94 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
     ):
         now = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
 
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter(
-                    and_(
-                        CourtCase.case_number == case_number,
-                        CourtCase.court_identifier == court_identifier,
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter(
+                        and_(
+                            CourtCase.case_number == case_number,
+                            CourtCase.court_identifier == court_identifier,
+                        )
                     )
-                )
-                .first()
-            )
-
-            if not case:
-                self.logger.error(f"Case {case_number} not found in database")
-                self.failed_count += 1
-                return
-
-            # Update core fields
-            for key, value in core_fields.items():
-                setattr(case, key, value)
-
-            self.logger.debug(f"Updated core fields: {list(core_fields.keys())}")
-
-            # Update extra_data
-            if case.extra_data is None:
-                case.extra_data = {}
-
-            extra_metadata["source_url"] = source_url
-            extra_metadata["enrichment_hearings"] = hearings
-            case.extra_data.update(extra_metadata)
-            flag_modified(case, "extra_data")
-
-            case.status = "enriched"
-            case.updated_at = now
-
-            # Update entities
-            deleted = (
-                self.session.query(CaseEntity)
-                .filter(
-                    and_(
-                        CaseEntity.case_number == case_number,
-                        CaseEntity.court_identifier == court_identifier,
-                    )
-                )
-                .delete()
-            )
-
-            if deleted > 0:
-                self.logger.debug(f"Deleted {deleted} old entities")
-
-            for plaintiff in entities["plaintiffs"]:
-                self.session.add(
-                    CaseEntity(
-                        case_number=case_number,
-                        court_identifier=court_identifier,
-                        side="plaintiff",
-                        name=plaintiff["name"],
-                        address=None,
-                        created_at=now,
-                        updated_at=now,
-                    )
+                    .first()
                 )
 
-            for defendant in entities["defendants"]:
-                self.session.add(
-                    CaseEntity(
-                        case_number=case_number,
-                        court_identifier=court_identifier,
-                        side="defendant",
-                        name=defendant["name"],
-                        address=None,
-                        created_at=now,
-                        updated_at=now,
+                if not case:
+                    self.logger.error(f"Case {case_number} not found in database")
+                    self.failed_count += 1
+                    return False
+
+                # Update core fields
+                for key, value in core_fields.items():
+                    setattr(case, key, value)
+
+                self.logger.debug(f"Updated core fields: {list(core_fields.keys())}")
+
+                # Update extra_data
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                extra_metadata["source_url"] = source_url
+                extra_metadata["enrichment_hearings"] = hearings
+                case.extra_data.update(extra_metadata)
+                flag_modified(case, "extra_data")
+
+                case.status = "enriched"
+                case.updated_at = now
+
+                # Update entities
+                deleted = (
+                    self.session.query(CaseEntity)
+                    .filter(
+                        and_(
+                            CaseEntity.case_number == case_number,
+                            CaseEntity.court_identifier == court_identifier,
+                        )
                     )
+                    .delete()
                 )
 
-            self.logger.debug(
-                f"Saved {len(entities['plaintiffs'])} plaintiffs, "
-                f"{len(entities['defendants'])} defendants"
-            )
+                if deleted > 0:
+                    self.logger.debug(f"Deleted {deleted} old entities")
+
+                for plaintiff in entities["plaintiffs"]:
+                    self.session.add(
+                        CaseEntity(
+                            case_number=case_number,
+                            court_identifier=court_identifier,
+                            side="plaintiff",
+                            name=plaintiff["name"],
+                            address=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+
+                for defendant in entities["defendants"]:
+                    self.session.add(
+                        CaseEntity(
+                            case_number=case_number,
+                            court_identifier=court_identifier,
+                            side="defendant",
+                            name=defendant["name"],
+                            address=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+
+                self.logger.debug(
+                    f"Saved {len(entities['plaintiffs'])} plaintiffs, "
+                    f"{len(entities['defendants'])} defendants"
+                )
+
+            return True
+
+        except Exception:
+            self.logger.exception(f"Failed to save enrichment for {case_number}")
+            self.failed_count += 1
+            return False
 
     def _mark_as_failed(self, case_number: str, court_identifier: str):
         try:
@@ -378,8 +413,8 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                 if case:
                     case.status = "failed"
                     case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
-        except Exception as e:
-            self.logger.error(f"Failed to mark case as failed: {e}")
+        except Exception:
+            self.logger.exception("Failed to mark case as failed")
 
     def closed(self, reason):
         self.logger.info("=" * 60)
