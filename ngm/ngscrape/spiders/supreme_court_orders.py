@@ -4,8 +4,6 @@ Supreme Court Orders Spider (Listing Only)
 Scrapes basic order information from Supreme Court website.
 This spider only lists cases with orders - it does NOT download documents.
 Use supreme_orders_enrichment.py to download the actual order documents.
-
-Target: https://supremecourt.gov.np/cp/
 """
 
 import scrapy
@@ -59,7 +57,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         # Log database type
         db_type = "LOCAL" if os.getenv("LOCAL_DATABASE_URL") else "PROD"
         parsed = urlparse(db_url)
-        safe_url = f"{parsed.scheme}://****@{parsed.hostname or ''}{parsed.path}"
+        
+        # Build safe URL with proper masking
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        query = f"?{parsed.query}" if parsed.query else ""
+        
+        # Only include credentials if they exist
+        if parsed.username or parsed.password:
+            safe_url = f"{parsed.scheme}://****:****@{host}{port}{parsed.path}{query}"
+        else:
+            safe_url = f"{parsed.scheme}://{host}{port}{parsed.path}{query}"
+        
         self.logger.info(f"Using {db_type} database: {safe_url}")
 
         self.engine = get_engine(db_url)
