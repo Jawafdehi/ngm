@@ -12,7 +12,7 @@ import pytz
 import scrapy
 from bs4 import BeautifulSoup
 from scrapy.http import FormRequest
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm.attributes import flag_modified
 
 from ngm.database.models import CaseEntity, CourtCase, get_engine, get_session, init_db
@@ -98,7 +98,10 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                 .filter(
                     and_(
                         CourtCase.court_identifier.in_(self.courts),
-                        CourtCase.status.in_(["pending", None]),
+                        or_(
+                            CourtCase.status == "pending",
+                            CourtCase.status.is_(None),
+                        ),
                     )
                 )
                 .order_by(CourtCase.registration_date_ad.desc().nullslast())
