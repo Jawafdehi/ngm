@@ -164,6 +164,11 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
         if success:
             self.success_count += 1
             self.logger.info(f"Successfully enriched {case_number}")
+        else:
+            self.logger.error(
+                f"Failed to save enrichment for {case_number} from {court_identifier}"
+            )
+            self._mark_as_failed(case_number, court_identifier)
 
     def _extract_enrichment_data(self, soup: BeautifulSoup) -> Dict:
         core_fields = {}
@@ -344,6 +349,7 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                 flag_modified(case, "extra_data")
 
                 case.status = "enriched"
+                case.enriched_at = now
                 case.updated_at = now
 
                 # Update entities
