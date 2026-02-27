@@ -2,9 +2,12 @@ import json
 import os
 from datetime import datetime
 from urllib.parse import urlparse
+import pytz
 from scrapy.pipelines.files import FilesPipeline
 from sqlalchemy.orm.attributes import flag_modified
 from ngm.database.models import CourtCase
+
+KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
 
 class KanunPatrikaPipeline(FilesPipeline):
@@ -169,7 +172,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                             if download_success:
                                 case.extra_data["orders_scraped"] = True
                                 case.extra_data["orders_scraped_at"] = (
-                                    datetime.now().isoformat()
+                                    datetime.now(KATHMANDU_TZ)
+                                    .replace(tzinfo=None)
+                                    .isoformat()
                                 )
                                 case.extra_data["orders_file_path"] = file_path
                                 # Don't overwrite case.status - it tracks case detail scrape status
@@ -183,7 +188,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                                     error_message or "Download failed"
                                 )
                                 case.extra_data["orders_failed_at"] = (
-                                    datetime.now().isoformat()
+                                    datetime.now(KATHMANDU_TZ)
+                                    .replace(tzinfo=None)
+                                    .isoformat()
                                 )
                                 flag_modified(case, "extra_data")
                                 info.spider.logger.info(
@@ -194,8 +201,8 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                                 f"Case not found in database: {case_number}"
                             )
 
-            except Exception as e:
-                info.spider.logger.exception(f"Error updating database: {e}")
+            except Exception:
+                info.spider.logger.exception("Error updating database")
 
         if file_path:
             metadata = {

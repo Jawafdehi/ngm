@@ -46,7 +46,14 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
         """
         super().__init__(*args, **kwargs)
 
-        self.limit = int(limit)
+        try:
+            self.limit = int(limit)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"limit must be a valid integer, got: {limit}") from e
+
+        if self.limit <= 0:
+            raise ValueError(f"limit must be positive, got: {self.limit}")
+
         self.engine = get_engine()
         init_db(self.engine)
         self.session = get_session(self.engine)
@@ -167,12 +174,12 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     case.extra_data.pop("order_started_at", None)
                     flag_modified(case, "extra_data")
 
-        except Exception as e:
-            self.logger.error(f"Error updating database for failed case: {e}")
+        except Exception:
+            self.logger.exception("Error updating database for failed case")
 
     def parse_document(self, response):
         """
-        Write downloaded document directly to disk.
+        Write downloaded document directly to disk using atomic writes.
 
         Scrapy has already fetched the file into response.body.
         We write it directly — no FilesPipeline, no second download.
@@ -207,20 +214,54 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
             f"Downloaded document for case {case_number} ({len(response.body)} bytes)"
         )
 
-        case_number_safe = case_number.replace("/", "-")
+        # Sanitize case_number and court_identifier for safe filenames
+        import re
+
+        case_number_safe = re.sub(r"[^A-Za-z0-9._-]+", "_", case_number).strip("._-")
+        if not case_number_safe:
+            case_number_safe = "unknown_case"
+
+        court_identifier_safe = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(court_identifier)
+        ).strip("._-")
+        if not court_identifier_safe:
+            court_identifier_safe = "unknown_court"
+
+        # Sanitize file extension
+        file_extension_safe = re.sub(r"[^A-Za-z0-9._-]+", "_", file_extension).strip(
+            "._-"
+        )
+        if not file_extension_safe.startswith("."):
+            file_extension_safe = f".{file_extension_safe}"
+
         file_dir = os.path.join(
-            FILES_STORE, "court", "orders", court_identifier, case_number_safe
+            FILES_STORE, "court", "orders", court_identifier_safe, case_number_safe
         )
 
         # TODO(GitHub #XXX): Support multiple files per case (file_2, file_3, etc.)
-        filename = f"file_1{file_extension}"
+        filename = f"file_1{file_extension_safe}"
         file_path = os.path.join(file_dir, filename)
 
         try:
             os.makedirs(file_dir, exist_ok=True)
 
-            with open(file_path, "wb") as f:
-                f.write(response.body)
+            # Atomic write: write to temp file, then rename
+            import tempfile
+
+            temp_fd, temp_path = tempfile.mkstemp(dir=file_dir, suffix=".tmp")
+            try:
+                with os.fdopen(temp_fd, "wb") as f:
+                    f.write(response.body)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                # Atomically replace temp file with final file
+                os.replace(temp_path, file_path)
+            except Exception:
+                # Clean up temp file on error
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise
 
             self.logger.info(f"Saved document to: {file_path}")
 
@@ -235,11 +276,24 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
             }
 
             metadata_path = os.path.join(file_dir, "metadata.json")
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            metadata_temp_path = f"{metadata_path}.tmp"
+
+            try:
+                with open(metadata_temp_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                # Atomically replace temp metadata with final metadata
+                os.replace(metadata_temp_path, metadata_path)
+            except Exception:
+                # Clean up temp metadata on error
+                if os.path.exists(metadata_temp_path):
+                    os.unlink(metadata_temp_path)
+                raise
 
             relative_path = os.path.join(
-                "court", "orders", court_identifier, case_number_safe, filename
+                "court", "orders", court_identifier_safe, case_number_safe, filename
             )
             self._mark_download_success(case_number, court_identifier, relative_path)
 
@@ -283,8 +337,8 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                         f"Updated database: {case_number} - orders_scraped=true"
                     )
 
-        except Exception as e:
-            self.logger.error(f"Error updating database for successful download: {e}")
+        except Exception:
+            self.logger.exception("Error updating database for successful download")
 
     def _mark_download_failed(self, case_number, court_identifier, error_message):
         """Mark case as failed download in database."""
@@ -319,8 +373,8 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                         f"Updated database: {case_number} - orders_failed=true, status=failed"
                     )
 
-        except Exception as e:
-            self.logger.error(f"Error updating database for failed download: {e}")
+        except Exception:
+            self.logger.exception("Error updating database for failed download")
 
     def closed(self, reason):
         """Spider cleanup - close session and dispose engine."""
@@ -335,5 +389,5 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
 
             self.logger.info(f"Enrichment spider closed: {reason}")
 
-        except Exception as e:
-            self.logger.error(f"Error in cleanup: {e}")
+        except Exception:
+            self.logger.exception("Error in cleanup")

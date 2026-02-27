@@ -253,8 +253,13 @@ class DatabaseSeeder:
                     text("SELECT COALESCE(MAX(id), 0) FROM court_case_hearings")
                 ).scalar()
 
+                # Use pg_get_serial_sequence for robustness
                 self.local_session.execute(
-                    text("SELECT setval('court_case_hearings_id_seq', :max_id, true)"),
+                    text(
+                        "SELECT setval("
+                        "pg_get_serial_sequence('court_case_hearings', 'id'), "
+                        ":max_id, true)"
+                    ),
                     {"max_id": max_id_result},
                 )
                 logger.info(f"Updated court_case_hearings sequence to {max_id_result}")

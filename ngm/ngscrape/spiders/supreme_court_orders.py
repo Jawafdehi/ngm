@@ -14,7 +14,6 @@ from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
 from datetime import datetime
 from scrapy.http import FormRequest
-from scrapy.exceptions import CloseSpider
 from bs4 import BeautifulSoup
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -47,9 +46,13 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     def __init__(self, limit=5, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.limit = int(limit)
+        try:
+            self.limit = int(limit)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"limit must be a valid integer, got: {limit}") from e
+
         if self.limit <= 0:
-            raise ValueError("limit must be positive")
+            raise ValueError(f"limit must be positive, got: {self.limit}")
 
         db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
         if not db_url:
@@ -145,8 +148,10 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             return []
 
     def start_requests(self):
-        # Check CAPTCHA extraction setting early
+        # Check CAPTCHA extraction setting early - fail fast if disabled
         if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
+            from scrapy.exceptions import CloseSpider
+
             raise CloseSpider(
                 f"[{self.name}] CAPTCHA cookie extraction is DISABLED. "
                 "Spider cannot function without CAPTCHA solving. "
@@ -177,8 +182,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                             "registration_date_bs": case.registration_date_bs or "",
                         }
                     )
-                except Exception as e:
-                    self.logger.error(f"Error preparing case {case.case_number}: {e}")
+                except ValueError as e:
+                    self.logger.exception(f"Error preparing case {case.case_number}")
                     self.failed_cases += 1
                     failed_preparations.append(
                         {
