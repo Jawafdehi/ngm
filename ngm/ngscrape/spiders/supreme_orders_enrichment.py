@@ -60,9 +60,6 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
 
         self.logger.info(f"Enrichment spider initialized (limit: {self.limit})")
 
-    def start(self):
-        return super().start()
-
     def start_requests(self):
         """
         Query pending cases, reserve them, then yield download requests.
@@ -98,8 +95,8 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
 
             self.logger.info(f"Found {len(cases_to_enrich)} cases to enrich")
 
-            # Reserve all cases in the same transaction before yielding requests.
-            # This prevents race conditions if two spiders run simultaneously.
+            # Materialize data into plain dicts INSIDE transaction to avoid ORM expiration
+            request_payloads = []
             for case in cases_to_enrich:
                 if case.extra_data is None:
                     case.extra_data = {}
@@ -109,34 +106,35 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                 )
                 flag_modified(case, "extra_data")
 
-            # Context manager auto-commits reservation here on exit
+                # Extract data while ORM objects are still attached
+                document_url = case.extra_data.get("order_document_url")
+                if document_url:
+                    url_path = urlparse(document_url).path
+                    file_ext = os.path.splitext(url_path)[1]
+                    if not file_ext:
+                        file_ext = ".doc"
 
-        # Yield requests AFTER reservation is committed to DB
-        for case in cases_to_enrich:
-            document_url = case.extra_data.get("order_document_url")
+                    request_payloads.append(
+                        {
+                            "case_number": case.case_number,
+                            "court_identifier": case.court_identifier,
+                            "document_url": document_url,
+                            "file_extension": file_ext,
+                        }
+                    )
 
-            if not document_url:
-                self.logger.warning(f"Case {case.case_number} has no document URL")
-                continue
+            # Transaction commits here on exit
 
-            url_path = urlparse(document_url).path
-            file_ext = os.path.splitext(url_path)[1]
-            if not file_ext:
-                file_ext = ".doc"
-
+        # Yield requests AFTER transaction using materialized data
+        for payload in request_payloads:
             self.logger.info(
-                f"Queuing download for case {case.case_number}: {document_url}"
+                f"Queuing download for case {payload['case_number']}: {payload['document_url']}"
             )
 
             yield scrapy.Request(
-                url=document_url,
+                url=payload["document_url"],
                 callback=self.parse_document,
-                meta={
-                    "case_number": case.case_number,
-                    "court_identifier": case.court_identifier,
-                    "document_url": document_url,
-                    "file_extension": file_ext,
-                },
+                meta=payload,
                 dont_filter=True,
                 errback=self.handle_error,
             )
@@ -145,37 +143,14 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
         """Handle network/download errors from Scrapy."""
         request = failure.request
         case_number = request.meta.get("case_number")
+        court_identifier = request.meta.get("court_identifier")
 
         self.logger.error(
             f"Error downloading document for case {case_number}: {failure.value}"
         )
 
-        try:
-            with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter_by(
-                        case_number=case_number,
-                        court_identifier=request.meta.get("court_identifier"),
-                    )
-                    .first()
-                )
-
-                if case:
-                    if case.extra_data is None:
-                        case.extra_data = {}
-
-                    case.extra_data["orders_failed"] = True
-                    case.extra_data["orders_error"] = str(failure.value)
-                    case.extra_data["orders_failed_at"] = (
-                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                    )
-                    case.extra_data.pop("order_in_progress", None)
-                    case.extra_data.pop("order_started_at", None)
-                    flag_modified(case, "extra_data")
-
-        except Exception:
-            self.logger.exception("Error updating database for failed case")
+        # Use centralized failure handler
+        self._mark_download_failed(case_number, court_identifier, str(failure.value))
 
     def parse_document(self, response):
         """
@@ -328,7 +303,7 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     case.extra_data.pop("orders_error", None)
                     case.extra_data.pop("orders_failed_at", None)
 
-                    case.status = "enriched"
+                    # Don't set case.status - it tracks case detail scrape status
                     case.extra_data.pop("order_in_progress", None)
                     case.extra_data.pop("order_started_at", None)
                     flag_modified(case, "extra_data")
@@ -361,12 +336,16 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     case.extra_data["orders_failed_at"] = (
                         datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
                     )
+
+                    # Clear any previous success state
+                    case.extra_data.pop("orders_scraped", None)
+                    case.extra_data.pop("orders_scraped_at", None)
+                    case.extra_data.pop("orders_file_path", None)
+
                     case.extra_data.pop("order_in_progress", None)
                     case.extra_data.pop("order_started_at", None)
 
-                    # Set case status to failed to match other enrichment spiders
-                    case.status = "failed"
-
+                    # Don't set case.status - it tracks case detail scrape status
                     flag_modified(case, "extra_data")
 
                     self.logger.info(

@@ -66,11 +66,26 @@ class DatabaseSeeder:
         self.stats = {"courts": 0, "cases": 0, "hearings": 0}
 
     def _validate_urls(self) -> None:
-        """Validate prod and local URLs are different."""
-        if self._get_db_identity(self.prod_url) == self._get_db_identity(
-            self.local_url
-        ):
-            raise SafetyCheckError("Prod and local URLs are the same. Aborting.")
+        """Validate prod and local URLs are different using SQLAlchemy URL parsing."""
+        from sqlalchemy.engine.url import make_url
+
+        try:
+            prod_url_obj = make_url(self.prod_url)
+            local_url_obj = make_url(self.local_url)
+
+            # Compare normalized URLs (host, port, database)
+            if (
+                prod_url_obj.host == local_url_obj.host
+                and prod_url_obj.port == local_url_obj.port
+                and prod_url_obj.database == local_url_obj.database
+            ):
+                raise SafetyCheckError(
+                    "Prod and local URLs point to the same database. Aborting."
+                )
+        except Exception as e:
+            if isinstance(e, SafetyCheckError):
+                raise
+            raise SafetyCheckError(f"Failed to parse database URLs: {e}") from e
 
     @staticmethod
     def _get_db_identity(url: str) -> Tuple[str, int | None, str]:

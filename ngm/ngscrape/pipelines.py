@@ -155,7 +155,13 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 court_identifier = item.get("court_identifier")
 
                 if case_number and court_identifier:
-                    with self.session.begin_nested():
+                    # Use begin() or begin_nested() depending on transaction state
+                    if self.session.in_transaction():
+                        ctx = self.session.begin_nested()
+                    else:
+                        ctx = self.session.begin()
+
+                    with ctx:
                         case = (
                             self.session.query(CourtCase)
                             .filter_by(
@@ -177,6 +183,10 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                                     .isoformat()
                                 )
                                 case.extra_data["orders_file_path"] = file_path
+                                # Clear any prior failure state
+                                case.extra_data.pop("orders_failed", None)
+                                case.extra_data.pop("orders_error", None)
+                                case.extra_data.pop("orders_failed_at", None)
                                 # Don't overwrite case.status - it tracks case detail scrape status
                                 flag_modified(case, "extra_data")
                                 info.spider.logger.info(
@@ -192,6 +202,10 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                                     .replace(tzinfo=None)
                                     .isoformat()
                                 )
+                                # Clear any prior success state
+                                case.extra_data.pop("orders_scraped", None)
+                                case.extra_data.pop("orders_scraped_at", None)
+                                case.extra_data.pop("orders_file_path", None)
                                 flag_modified(case, "extra_data")
                                 info.spider.logger.info(
                                     f"Updated database: {case_number} - orders_failed=true"

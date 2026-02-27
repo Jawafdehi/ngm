@@ -625,6 +625,14 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
     def _mark_case_failed(self, case_number, court_identifier, error_message):
         """Mark case as failed."""
+        # Guard against missing identifiers
+        if not case_number or not court_identifier:
+            self.logger.warning(
+                f"Skipping failure mark due to missing identifiers: "
+                f"case_number={case_number!r}, court_identifier={court_identifier!r}"
+            )
+            return
+
         try:
             with self.session.begin():
                 case = (

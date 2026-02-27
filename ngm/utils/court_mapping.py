@@ -49,11 +49,14 @@ DISTRICT_COURT_REVERSE_MAP = {
 }
 
 # Validate HIGH_COURTS data integrity at load time
-assert len(HIGH_COURTS) > 0, "HIGH_COURTS list is empty"
-assert len(HIGH_COURTS) == len(HIGH_COURT_ID_MAP), (
-    f"HIGH_COURTS length mismatch: expected {len(HIGH_COURTS)}, "
-    f"got {len(HIGH_COURT_ID_MAP)} in mapping"
-)
+if len(HIGH_COURTS) == 0:
+    raise ValueError("HIGH_COURTS list is empty")
+
+if len(HIGH_COURTS) != len(HIGH_COURT_ID_MAP):
+    raise ValueError(
+        f"HIGH_COURTS length mismatch: expected {len(HIGH_COURTS)}, "
+        f"got {len(HIGH_COURT_ID_MAP)} in mapping"
+    )
 
 # Validate site_id sequence is complete (1 to N)
 expected_ids = set(range(1, len(HIGH_COURTS) + 1))
