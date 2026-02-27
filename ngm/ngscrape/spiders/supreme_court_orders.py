@@ -57,18 +57,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         # Log database type
         db_type = "LOCAL" if os.getenv("LOCAL_DATABASE_URL") else "PROD"
         parsed = urlparse(db_url)
-        
+
         # Build safe URL with proper masking
         host = parsed.hostname or ""
         port = f":{parsed.port}" if parsed.port else ""
         query = f"?{parsed.query}" if parsed.query else ""
-        
+
         # Only include credentials if they exist
         if parsed.username or parsed.password:
             safe_url = f"{parsed.scheme}://****:****@{host}{port}{parsed.path}{query}"
         else:
             safe_url = f"{parsed.scheme}://{host}{port}{parsed.path}{query}"
-        
+
         self.logger.info(f"Using {db_type} database: {safe_url}")
 
         self.engine = get_engine(db_url)
@@ -108,18 +108,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     CourtCase.extra_data.is_(None),
                     and_(
                         or_(
-                            CourtCase.extra_data["orders_scraped"]
-                            .astext
-                            .is_(None),
-                            CourtCase.extra_data["orders_scraped"].astext
-                            != "true",
+                            CourtCase.extra_data["orders_scraped"].astext.is_(None),
+                            CourtCase.extra_data["orders_scraped"].astext != "true",
                         ),
                         or_(
-                            CourtCase.extra_data["order_document_url"]
-                            .astext
-                            .is_(None),
-                            CourtCase.extra_data["order_document_url"].astext
-                            == "",
+                            CourtCase.extra_data["order_document_url"].astext.is_(None),
+                            CourtCase.extra_data["order_document_url"].astext == "",
                         ),
                     ),
                 )
