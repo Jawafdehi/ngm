@@ -245,6 +245,20 @@ class DatabaseSeeder:
             for hearing in hearing_data:
                 self.local_session.merge(CourtCaseHearing(**hearing))
 
+            # Update sequence to prevent ID collisions on future inserts
+            if hearing_data:
+                from sqlalchemy import text
+                
+                max_id_result = self.local_session.execute(
+                    text("SELECT COALESCE(MAX(id), 0) FROM court_case_hearings")
+                ).scalar()
+                
+                self.local_session.execute(
+                    text("SELECT setval('court_case_hearings_id_seq', :max_id, true)"),
+                    {"max_id": max_id_result}
+                )
+                logger.info(f"Updated court_case_hearings sequence to {max_id_result}")
+
         self.stats["hearings"] = len(hearing_data)
         logger.info(f"Seeded {len(hearing_data)} hearings")
 

@@ -81,6 +81,7 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                 )
                 .order_by(CourtCase.registration_date_ad.desc().nullslast())
                 .limit(self.limit)
+                .with_for_update(skip_locked=True)  # Lock rows, skip already locked
                 .all()
             )
 
@@ -302,10 +303,14 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     )
                     case.extra_data.pop("order_in_progress", None)
                     case.extra_data.pop("order_started_at", None)
+                    
+                    # Set case status to failed to match other enrichment spiders
+                    case.status = "failed"
+                    
                     flag_modified(case, "extra_data")
 
                     self.logger.info(
-                        f"Updated database: {case_number} - orders_failed=true"
+                        f"Updated database: {case_number} - orders_failed=true, status=failed"
                     )
 
         except Exception as e:

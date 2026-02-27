@@ -14,6 +14,7 @@ from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
 from datetime import datetime
 from scrapy.http import FormRequest
+from scrapy.exceptions import CloseSpider
 from bs4 import BeautifulSoup
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -146,9 +147,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     def start_requests(self):
         # Check CAPTCHA extraction setting early
         if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
-            self.logger.warning(
+            raise CloseSpider(
                 f"[{self.name}] CAPTCHA cookie extraction is DISABLED. "
-                "Spider will fail to scrape without CAPTCHA solving. "
+                "Spider cannot function without CAPTCHA solving. "
                 "Set ENABLE_CAPTCHA_COOKIE_EXTRACT=True after obtaining legal/compliance approval."
             )
 
@@ -211,10 +212,26 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """Extract CAPTCHA and submit search form, handling redirects manually."""
         max_retries = 3
         retry_count = response.meta.get("retry_count", 0)
+        max_redirect_hops = 10
+        redirect_hops = response.meta.get("redirect_hops", 0)
 
         try:
             # Handle redirect manually
             if response.status in (301, 302):
+                # Check redirect hop limit
+                if redirect_hops >= max_redirect_hops:
+                    self.logger.error(
+                        f"[{response.meta.get('case_number')}] Too many redirects ({redirect_hops} hops)"
+                    )
+                    self.failed_cases += 1
+                    self._mark_case_failed(
+                        case_number=response.meta.get("case_number"),
+                        court_identifier=response.meta.get("court_identifier"),
+                        error_message=f"Too many redirect hops ({redirect_hops})",
+                    )
+                    yield from self._yield_next_case()
+                    return
+
                 location = response.headers.get("Location")
 
                 # Guard against missing/empty Location header
@@ -240,6 +257,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 meta = response.meta.copy()
                 if captcha_from_redirect:
                     meta["captcha_solution"] = captcha_from_redirect
+                meta["redirect_hops"] = redirect_hops + 1
 
                 yield scrapy.Request(
                     url=redirect_url,
@@ -355,8 +373,24 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """Parse search results and save order information to database."""
         case_number = response.meta.get("case_number")
         court_identifier = response.meta.get("court_identifier")
+        max_redirect_hops = 10
+        redirect_hops = response.meta.get("redirect_hops", 0)
 
         if response.status in (301, 302):
+            # Check redirect hop limit
+            if redirect_hops >= max_redirect_hops:
+                self.logger.error(
+                    f"[{case_number}] Too many redirects in search results ({redirect_hops} hops)"
+                )
+                self.failed_cases += 1
+                self._mark_case_failed(
+                    case_number=case_number,
+                    court_identifier=court_identifier,
+                    error_message=f"Too many redirect hops in search results ({redirect_hops})",
+                )
+                yield from self._yield_next_case()
+                return
+
             location = response.headers.get("Location")
 
             # Guard against missing/empty Location header
@@ -373,11 +407,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             redirect_url = urljoin(response.url, location.decode("utf-8"))
             self.logger.info(f"[{case_number}] POST redirected to: {redirect_url}")
+            
+            meta = response.meta.copy()
+            meta["redirect_hops"] = redirect_hops + 1
+            
             yield scrapy.Request(
                 url=redirect_url,
                 callback=self.parse_search_results,
                 meta={
-                    **response.meta,
+                    **meta,
                     "handle_httpstatus_list": [301, 302],
                 },
                 dont_filter=True,

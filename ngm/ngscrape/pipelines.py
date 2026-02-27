@@ -152,7 +152,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 court_identifier = item.get("court_identifier")
 
                 if case_number and court_identifier:
-                    with self.session.begin():
+                    with self.session.begin_nested():
                         case = (
                             self.session.query(CourtCase)
                             .filter_by(
@@ -172,7 +172,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                                     datetime.now().isoformat()
                                 )
                                 case.extra_data["orders_file_path"] = file_path
-                                case.status = "enriched"
+                                # Don't overwrite case.status - it tracks case detail scrape status
                                 flag_modified(case, "extra_data")
                                 info.spider.logger.info(
                                     f"Updated database: {case_number} - orders_scraped=true"
@@ -195,7 +195,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                             )
 
             except Exception as e:
-                info.spider.logger.error(f"Error updating database: {e}")
+                info.spider.logger.exception(f"Error updating database: {e}")
 
         if file_path:
             metadata = {
