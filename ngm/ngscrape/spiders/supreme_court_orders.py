@@ -109,16 +109,16 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     and_(
                         or_(
                             CourtCase.extra_data["orders_scraped"]
-                            .as_string()
+                            .astext
                             .is_(None),
-                            CourtCase.extra_data["orders_scraped"].as_string()
+                            CourtCase.extra_data["orders_scraped"].astext
                             != "true",
                         ),
                         or_(
                             CourtCase.extra_data["order_document_url"]
-                            .as_string()
+                            .astext
                             .is_(None),
-                            CourtCase.extra_data["order_document_url"].as_string()
+                            CourtCase.extra_data["order_document_url"].astext
                             == "",
                         ),
                     ),
