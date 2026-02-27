@@ -53,7 +53,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
         if not db_url:
-            raise ValueError("DATABASE_URL not set")
+            raise ValueError("LOCAL_DATABASE_URL or DATABASE_URL not set")
 
         # Log database type
         db_type = "LOCAL" if os.getenv("LOCAL_DATABASE_URL") else "PROD"
@@ -407,10 +407,10 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             redirect_url = urljoin(response.url, location.decode("utf-8"))
             self.logger.info(f"[{case_number}] POST redirected to: {redirect_url}")
-            
+
             meta = response.meta.copy()
             meta["redirect_hops"] = redirect_hops + 1
-            
+
             yield scrapy.Request(
                 url=redirect_url,
                 callback=self.parse_search_results,

@@ -268,6 +268,12 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                         datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
                     )
                     case.extra_data["orders_file_path"] = file_path
+
+                    # Clear any previous failure state
+                    case.extra_data.pop("orders_failed", None)
+                    case.extra_data.pop("orders_error", None)
+                    case.extra_data.pop("orders_failed_at", None)
+
                     case.status = "enriched"
                     case.extra_data.pop("order_in_progress", None)
                     case.extra_data.pop("order_started_at", None)
@@ -303,10 +309,10 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     )
                     case.extra_data.pop("order_in_progress", None)
                     case.extra_data.pop("order_started_at", None)
-                    
+
                     # Set case status to failed to match other enrichment spiders
                     case.status = "failed"
-                    
+
                     flag_modified(case, "extra_data")
 
                     self.logger.info(
