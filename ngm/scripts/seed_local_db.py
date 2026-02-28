@@ -87,20 +87,6 @@ class DatabaseSeeder:
                 raise
             raise SafetyCheckError(f"Failed to parse database URLs: {e}") from e
 
-    @staticmethod
-    def _get_db_identity(url: str) -> Tuple[str, int | None, str]:
-        """Extract (hostname, port, path) from DB URL."""
-        parsed = urlparse(url)
-        scheme = (parsed.scheme or "").lower().split("+", 1)[0]
-        hostname = (parsed.hostname or "").lower()
-
-        port = parsed.port
-        if port is None:
-            default_ports = {"postgresql": 5432, "postgres": 5432, "mysql": 3306}
-            port = default_ports.get(scheme)
-
-        return (hostname, port, (parsed.path or "").rstrip("/"))
-
     def _connect_databases(self) -> None:
         """Establish connections to production and local databases."""
         logger.info("Connecting to production database...")
@@ -179,7 +165,7 @@ class DatabaseSeeder:
                 self.prod_session.query(CourtCase)
                 .filter(CourtCase.court_identifier == "special")
                 .filter(CourtCase.case_status.like("%फैसला%"))
-                .filter(CourtCase.registration_date_bs >= "2065")
+                .filter(CourtCase.registration_date_bs >= "2080")
                 .order_by(CourtCase.registration_date_bs.desc())
                 .limit(self.cases_limit)
                 .all()
@@ -314,7 +300,7 @@ class DatabaseSeeder:
         Returns:
             Masked URL with credentials hidden
         """
-        from urllib.parse import urlparse, urlunparse
+        from urllib.parse import urlunparse
 
         parsed = urlparse(url)
         if parsed.username or parsed.password:
