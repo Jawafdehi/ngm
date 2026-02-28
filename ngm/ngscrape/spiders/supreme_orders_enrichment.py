@@ -73,6 +73,7 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                 .filter(
                     and_(
                         CourtCase.extra_data["order_document_url"].astext.isnot(None),
+                        CourtCase.extra_data["order_document_url"].astext != "",
                         or_(
                             CourtCase.extra_data["orders_scraped"].astext.is_(None),
                             CourtCase.extra_data["orders_scraped"].astext != "true",
@@ -349,7 +350,7 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                     flag_modified(case, "extra_data")
 
                     self.logger.info(
-                        f"Updated database: {case_number} - orders_failed=true, status=failed"
+                        f"Updated database: {case_number} - orders_failed=true"
                     )
 
         except Exception:
