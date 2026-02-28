@@ -13,7 +13,7 @@ import os
 import json
 import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import and_, or_
 from sqlalchemy.orm.attributes import flag_modified
@@ -80,7 +80,16 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
 
         Reservation pattern: mark cases as in_progress before yielding
         requests so concurrent spider runs don't process the same cases.
+        Stale lease recovery: reclaim cases where order_started_at is older
+        than 30 minutes (crashed workers).
         """
+        # Calculate stale threshold (30 minutes ago)
+        stale_threshold = (
+            (datetime.now(KATHMANDU_TZ) - timedelta(minutes=30))
+            .replace(tzinfo=None)
+            .isoformat()
+        )
+
         with self.session.begin():
             cases_to_enrich = (
                 self.session.query(CourtCase)
@@ -93,8 +102,12 @@ class SupremeOrdersEnrichmentSpider(scrapy.Spider):
                             CourtCase.extra_data["orders_scraped"].astext != "true",
                         ),
                         or_(
+                            # Not in progress
                             CourtCase.extra_data["order_in_progress"].astext.is_(None),
                             CourtCase.extra_data["order_in_progress"].astext != "true",
+                            # Or stale (started more than 30 minutes ago)
+                            CourtCase.extra_data["order_started_at"].astext
+                            < stale_threshold,
                         ),
                     )
                 )
