@@ -73,12 +73,12 @@ class DatabaseSeeder:
             prod_url_obj = make_url(self.prod_url)
             local_url_obj = make_url(self.local_url)
 
-            # Compare normalized URLs (host, port, database)
-            if (
-                prod_url_obj.host == local_url_obj.host
-                and prod_url_obj.port == local_url_obj.port
-                and prod_url_obj.database == local_url_obj.database
-            ):
+            # Compare full normalized URLs including query parameters
+            # This ensures different endpoints (unix sockets, Cloud SQL proxies, etc.) are detected
+            prod_normalized = prod_url_obj.render_as_string(hide_password=False)
+            local_normalized = local_url_obj.render_as_string(hide_password=False)
+
+            if prod_normalized == local_normalized:
                 raise SafetyCheckError(
                     "Prod and local URLs point to the same database. Aborting."
                 )
@@ -171,7 +171,7 @@ class DatabaseSeeder:
             List of case data dictionaries for use in seeding hearings
         """
         logger.info(
-            f"Seeding cases (special court with verdicts, limit: {self.cases_limit})..."
+            f"Seeding cases (special court with verdicts, 2080 BS onwards, limit: {self.cases_limit})..."
         )
 
         with self.prod_session.begin():
@@ -179,6 +179,7 @@ class DatabaseSeeder:
                 self.prod_session.query(CourtCase)
                 .filter(CourtCase.court_identifier == "special")
                 .filter(CourtCase.case_status.like("%फैसला%"))
+                .filter(CourtCase.registration_date_bs >= "2065")
                 .order_by(CourtCase.registration_date_bs.desc())
                 .limit(self.cases_limit)
                 .all()

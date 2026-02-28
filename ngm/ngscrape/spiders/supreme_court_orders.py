@@ -43,7 +43,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         },
     }
 
-    def __init__(self, limit=5, *args, **kwargs):
+    def __init__(self, limit=500, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         try:
