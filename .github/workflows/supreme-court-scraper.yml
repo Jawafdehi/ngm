@@ -51,6 +51,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   enrich:
+    needs: scrape
     runs-on: ubuntu-latest
     environment: 'NGM Scrape'
     
@@ -80,6 +81,12 @@ jobs:
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
+
+      - name: Google Cloud SQL Proxy
+        uses: NewNepal-org/gce-cloudsql-proxy-action@145471ad36a0211ca4a7b90af14587bcc35b3c99 # master as of 2026-03-01
+        with:
+          creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          instance: ${{ secrets.NGM_SQL_INSTANCE }}
 
       - name: Run Supreme Court enrichment spider
         working-directory: ./ngm

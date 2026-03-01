@@ -12,7 +12,7 @@ import os
 import pytz
 from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
-from datetime import datetime
+from datetime import datetime, timedelta
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
 from sqlalchemy.orm.attributes import flag_modified
@@ -83,8 +83,22 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.failed_cases = 0
 
     def _get_cases_to_scrape(self):
-        """Query cases with final decisions that haven't been scraped."""
+        """
+        Query cases with final decisions that haven't been scraped.
+        
+        Uses row-level locking with skip_locked=True to prevent concurrent
+        spider runs from processing the same cases. Also implements stale
+        lease recovery for cases where listing_in_progress was set but the
+        worker crashed (older than 30 minutes).
+        """
         try:
+            # Calculate stale threshold (30 minutes ago)
+            stale_threshold = (
+                (datetime.now(KATHMANDU_TZ) - timedelta(minutes=30))
+                .replace(tzinfo=None)
+                .isoformat()
+            )
+
             query = self.session.query(CourtCase).join(Court)
 
             # Has final decision
@@ -123,6 +137,17 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 )
             )
 
+            # Not currently being processed (or stale lease)
+            query = query.filter(
+                or_(
+                    # Not in progress
+                    CourtCase.extra_data["listing_in_progress"].astext.is_(None),
+                    CourtCase.extra_data["listing_in_progress"].astext != "true",
+                    # Or stale (started more than 30 minutes ago)
+                    CourtCase.extra_data["listing_started_at"].astext < stale_threshold,
+                )
+            )
+
             # Priority: Special → Supreme → High → District
             court_priority = sql_case(
                 (Court.court_type == "special", 1),
@@ -137,6 +162,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     court_priority, CourtCase.registration_date_ad.asc().nullslast()
                 )
                 .limit(self.limit)
+                .with_for_update(skip_locked=True)  # Lock rows, skip already locked
                 .all()
             )
 
@@ -172,6 +198,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
             for case in cases:
                 try:
+                    # Atomically claim this case by setting lease flags
+                    if case.extra_data is None:
+                        case.extra_data = {}
+                    case.extra_data["listing_in_progress"] = True
+                    case.extra_data["listing_started_at"] = (
+                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                    )
+                    flag_modified(case, "extra_data")
+
                     court_type, court_id = get_court_params(case.court_identifier)
                     self._pending_cases.append(
                         {
@@ -615,6 +650,10 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 case.extra_data.pop("order_listing_error", None)
                 case.extra_data.pop("order_listing_failed_at", None)
 
+                # Clear lease flags
+                case.extra_data.pop("listing_in_progress", None)
+                case.extra_data.pop("listing_started_at", None)
+
                 flag_modified(case, "extra_data")
                 self.logger.info(f"Saved {len(documents)} doc(s) for {case_number}")
                 return True
@@ -656,6 +695,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                             .isoformat(),
                         }
                     )
+
+                    # Clear lease flags on failure
+                    case.extra_data.pop("listing_in_progress", None)
+                    case.extra_data.pop("listing_started_at", None)
+
                     flag_modified(case, "extra_data")
 
         except Exception:
