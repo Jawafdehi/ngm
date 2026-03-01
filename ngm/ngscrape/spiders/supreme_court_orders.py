@@ -85,7 +85,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     def _get_cases_to_scrape(self):
         """
         Query cases with final decisions that haven't been scraped.
-        
+
         Uses row-level locking with skip_locked=True to prevent concurrent
         spider runs from processing the same cases. Also implements stale
         lease recovery for cases where listing_in_progress was set but the
