@@ -353,16 +353,17 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                 case.enriched_at = now
                 case.updated_at = now
 
-                # Update entities
+                # Update entities - only delete plaintiff/defendant sides managed by this spider
                 deleted = (
                     self.session.query(CaseEntity)
                     .filter(
                         and_(
                             CaseEntity.case_number == case_number,
                             CaseEntity.court_identifier == court_identifier,
+                            CaseEntity.side.in_(["plaintiff", "defendant"]),
                         )
                     )
-                    .delete()
+                    .delete(synchronize_session=False)
                 )
 
                 if deleted > 0:
