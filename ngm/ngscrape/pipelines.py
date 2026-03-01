@@ -115,9 +115,9 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
                             bucket_name = parsed_store.netloc
                             prefix = parsed_store.path.lstrip("/")
 
-                            # Construct full S3 key
+                            # Construct full S3 key (use forward slashes for S3, not os.path.join)
                             s3_key = (
-                                os.path.join(prefix, json_file_path)
+                                f"{prefix}/{json_file_path}"
                                 if prefix
                                 else json_file_path
                             )
@@ -150,7 +150,7 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
 
                             info.spider.logger.info(f"Uploaded: {json_file_path}")
                         except Exception as e:
-                            info.spider.logger.error(
+                            info.spider.logger.exception(
                                 f"Failed to upload JSON metadata to S3: {e}"
                             )
                     elif files_store and files_store.startswith(("gs://", "ftp://")):
@@ -275,7 +275,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 court_identifier = item.get("court_identifier")
 
                 if case_number and court_identifier:
-                    with self.session.begin():
+                    with self.session.begin_nested():
                         case = (
                             self.session.query(CourtCase)
                             .filter_by(
@@ -318,7 +318,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                             )
 
             except Exception as e:
-                info.spider.logger.error(f"Error updating database: {e}")
+                info.spider.logger.exception(f"Error updating database: {e}")
 
         if file_path:
             metadata = {
