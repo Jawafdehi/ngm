@@ -89,12 +89,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         Uses row-level locking with skip_locked=True to prevent concurrent
         spider runs from processing the same cases. Also implements stale
         lease recovery for cases where listing_in_progress was set but the
-        worker crashed (older than 30 minutes).
+        worker crashed (configurable TTL, defaults to 60 minutes to handle
+        large queues with sequential processing).
         """
         try:
-            # Calculate stale threshold (30 minutes ago)
+            # Calculate stale threshold (configurable, defaults to 60 minutes)
+            # With limit=500, CONCURRENT_REQUESTS=1, DOWNLOAD_DELAY=3s,
+            # worst-case queue time is ~25 minutes. 60 min provides safety margin.
+            lease_ttl_minutes = self.settings.getint(
+                "ORDER_LISTING_LEASE_TTL_MINUTES", 60
+            )
             stale_threshold = (
-                (datetime.now(KATHMANDU_TZ) - timedelta(minutes=30))
+                (datetime.now(KATHMANDU_TZ) - timedelta(minutes=lease_ttl_minutes))
                 .replace(tzinfo=None)
                 .isoformat()
             )
@@ -143,8 +149,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     # Not in progress
                     CourtCase.extra_data["listing_in_progress"].astext.is_(None),
                     CourtCase.extra_data["listing_in_progress"].astext != "true",
-                    # Or stale (started more than 30 minutes ago)
-                    CourtCase.extra_data["listing_started_at"].astext < stale_threshold,
+                    # Or stale: missing timestamp (wedged) or older than TTL
+                    and_(
+                        CourtCase.extra_data["listing_in_progress"].astext == "true",
+                        or_(
+                            CourtCase.extra_data["listing_started_at"].astext.is_(None),
+                            CourtCase.extra_data["listing_started_at"].astext
+                            < stale_threshold,
+                        ),
+                    ),
                 )
             )
 
@@ -162,7 +175,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     court_priority, CourtCase.registration_date_ad.asc().nullslast()
                 )
                 .limit(self.limit)
-                .with_for_update(skip_locked=True)  # Lock rows, skip already locked
+                .with_for_update(
+                    of=CourtCase, skip_locked=True
+                )  # Lock only CourtCase rows
                 .all()
             )
 
