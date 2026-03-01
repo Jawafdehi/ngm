@@ -146,8 +146,19 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             f"{len(hearings)} hearings"
         )
 
-        if not enrichment_result["core_fields"] and not enrichment_result["extra_data"]:
-            self.logger.warning(f"No data extracted for {case_number}")
+        # Only mark as failed if we got absolutely nothing
+        has_data = (
+            enrichment_result["core_fields"]
+            or enrichment_result["extra_data"]
+            or entities["plaintiffs"]
+            or entities["defendants"]
+            or hearings
+        )
+
+        if not has_data:
+            self.logger.warning(
+                f"No data extracted for {case_number} - no core fields, extra data, entities, or hearings"
+            )
             self.failed_count += 1
             self._mark_as_failed(case_number, court_identifier)
             return
