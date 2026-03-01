@@ -53,10 +53,11 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
         self.logger.info(f"Initialized for courts: {self.courts}")
 
     def start_requests(self):
-        db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
+        db_url = os.getenv("DATABASE_URL")
         if not db_url:
-            self.logger.error("No database URL found")
-            return
+            error_msg = "No database URL found. Set DATABASE_URL environment variable."
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
 
         try:
             self.engine = get_engine(db_url)
