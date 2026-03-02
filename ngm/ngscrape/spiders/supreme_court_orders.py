@@ -113,6 +113,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 and_(
                     CourtCase.verdict_date_bs.isnot(None),
                     CourtCase.verdict_date_bs != "**** ** **",
+                    CourtCase.verdict_date_bs != "****-**-**",
                 ),
                 CourtCase.case_status.like("%फैसला%"),
             )
@@ -123,6 +124,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 or_(
                     CourtCase.case_status.is_(None),
                     ~CourtCase.case_status.like("%चालु%"),
+                    ~CourtCase.case_status.like("%चलिरहेको%"),
                 )
             )
 
