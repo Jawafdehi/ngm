@@ -14,7 +14,7 @@ from typing import List, Dict
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
 import pytz
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm.attributes import flag_modified
 from ngm.utils.normalizer import (
     normalize_date,
@@ -119,7 +119,10 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
                 .filter(
                     and_(
                         CourtCase.court_identifier.like("%dc"),
-                        CourtCase.status.in_(["pending", None]),
+                        or_(
+                            CourtCase.status == "pending",
+                            CourtCase.status.is_(None),
+                        ),
                     )
                 )
                 .order_by(CourtCase.registration_date_ad.desc().nullslast())
