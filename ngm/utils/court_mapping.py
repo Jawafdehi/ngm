@@ -24,7 +24,7 @@ _logger = logging.getLogger(__name__)
 
 # Direct mapping for courts that don't need a numeric ID
 COURT_TYPE_MAP = {
-    "supreme": ("S", ""),
+    "supreme": ("S", "264"),  # Supreme Court requires court_id=264
     "special": ("T", ""),
 }
 

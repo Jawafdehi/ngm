@@ -89,161 +89,232 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
 
 class SupremeCourtOrdersPipeline(FilesPipeline):
     """
-    Pipeline for downloading Supreme Court order documents and saving metadata.
+    Pipeline for Supreme Court order documents.
 
-    NOTE: The enrichment spider (supreme_orders_enrichment.py) does NOT use this
-    pipeline - it handles file writing directly. This pipeline exists for any
-    future spider that yields items with file_urls for court order documents.
+    Responsibilities:
+    - Downloads files using Scrapy's FilesPipeline (storage backend configured via FILES_STORE setting)
+    - Generates organized file paths: court-orders/{court}/{case}.{n}.{ext}
+    - Updates database with file paths in extra_data["court_orders"]
+    - Tracks success/failure to skip already-scraped cases on next run
+
+    Storage:
+    - FILES_STORE setting determines storage backend (S3, local filesystem, etc.)
+    - File paths are relative to FILES_STORE root
+
+    Database schema (extra_data JSONB column):
+        Success: {
+            "court_orders": ["court-orders/special/082-OA-0503.1.docx", ...],
+            "court_orders_scraped_at": "2026-03-03T12:48:58"
+        }
+        Failure: {
+            "orders_failed": true,
+            "orders_error": "Results table found but no download links",
+            "orders_failed_at": "2026-03-03T12:49:07"
+        }
     """
 
     def open_spider(self, spider):
+        """Initialize pipeline with database session from spider."""
         super().open_spider(spider)
 
-        if hasattr(spider, "session"):
-            self.session = spider.session
-            spider.logger.info("Pipeline initialized with database session")
-        else:
-            self.session = None
-            spider.logger.warning("Spider has no database session")
+        if not hasattr(spider, "session"):
+            raise RuntimeError(
+                f"SupremeCourtOrdersPipeline requires spider to have a database session. "
+                f"Spider '{spider.name}' has no 'session' attribute."
+            )
 
-    def close_spider(self, spider):
-        if self.session:
-            spider.logger.info("Pipeline database session will be closed by spider")
-        super().close_spider(spider)
+        self.session = spider.session
 
     def file_path(self, request, response=None, info=None, *, item=None):
         """
-        Generate file path relative to FILES_STORE.
-        Format: court/orders/<court_identifier>/<case_number>/file_1.{extension}
+        Generate file path for each document.
+
+        Format: court-orders/{court_identifier}/{case_number}.{n}.{ext}
+        Example: court-orders/special/082-OA-0503.1.docx
+
+        Args:
+            request: Scrapy request object containing the download URL
+            item: Item containing case_number and court_identifier
+
+        Returns:
+            str: File path relative to FILES_STORE
         """
-        court_identifier = item.get("court_identifier", "unknown")
-        case_number = item.get("case_number", "unknown").replace("/", "-")
+        court_identifier = item.get("court_identifier")
+        case_number = item.get("case_number")
 
-        file_ext = item.get("file_extension")
-        if not file_ext:
-            # Parse URL path to avoid including query strings in extension
-            url_path = urlparse(request.url).path
-            file_ext = os.path.splitext(url_path)[1]
-        if not file_ext:
-            file_ext = ".doc"
+        if not court_identifier or not case_number:
+            raise ValueError(
+                f"Item missing required fields. "
+                f"court_identifier: {court_identifier!r}, "
+                f"case_number: {case_number!r}"
+            )
 
-        # TODO(GitHub #XXX): Support multiple files per case (file_2, file_3, etc.)
-        filename = f"file_1{file_ext}"
+        # Make case number filesystem-safe (replace slashes with dashes)
+        case_number_safe = case_number.replace("/", "-")
 
-        return os.path.join("court", "orders", court_identifier, case_number, filename)
+        # Number files sequentially (.1, .2, .3) for cases with multiple documents
+        all_urls = item.get("file_urls", [])
+        if request.url not in all_urls:
+            raise ValueError(
+                f"Request URL {request.url!r} not found in item file_urls. "
+                f"Available URLs: {all_urls}"
+            )
+        n = all_urls.index(request.url) + 1
+
+        # Extract file extension from download URL, fallback to .doc
+        ext = os.path.splitext(urlparse(request.url).path)[1] or ".doc"
+
+        return f"court-orders/{court_identifier}/{case_number_safe}.{n}{ext}"
 
     def item_completed(self, results, item, info):
-        """Update database status and save metadata JSON after download."""
-        file_path = None
-        download_success = False
-        error_message = None
+        """
+        Process completed downloads and update database.
 
+        Called by Scrapy after all files in the item have been processed.
+
+        Handles two types of items:
+        1. Success items: file_urls contains download URLs
+        2. Error items: file_urls is empty, error field contains error message
+
+        Args:
+            results: List of (success, result_dict) tuples from FilesPipeline
+            item: The scraped item
+            info: Spider info object
+
+        Returns:
+            item: The original item (unchanged)
+        """
+        case_number = item.get("case_number")
+        court_identifier = item.get("court_identifier")
+
+        if not case_number or not court_identifier:
+            raise ValueError(
+                f"item_completed called with missing required fields. "
+                f"case_number: {case_number!r}, "
+                f"court_identifier: {court_identifier!r}"
+            )
+
+        # Check if spider sent an error item (parsing/scraping failure)
+        spider_error = item.get("error")
+
+        successful_paths = []
+        failed_results = []
+
+        # Process download results
         for ok, result in results:
             if ok:
+                # result["path"] is the file path from file_path()
+                # e.g., "court-orders/special/082-OA-0503.1.docx"
                 file_path = result["path"]
-                download_success = True
-                info.spider.logger.info(f"Downloaded: {file_path}")
+                successful_paths.append(file_path)
+                info.spider.logger.info(f"[{case_number}] Saved: {file_path}")
             else:
-                error_message = str(result)
-                info.spider.logger.error(
-                    f"Failed to download: {item.get('document_url')} - {error_message}"
-                )
+                # File download/upload failed
+                failed_results.append(str(result))
+                info.spider.logger.error(f"[{case_number}] Failed: {result}")
 
-        if self.session:
-            try:
-                case_number = item.get("case_number")
-                court_identifier = item.get("court_identifier")
-
-                if case_number and court_identifier:
-                    # Use begin() or begin_nested() depending on transaction state
-                    if self.session.in_transaction():
-                        ctx = self.session.begin_nested()
-                    else:
-                        ctx = self.session.begin()
-
-                    with ctx:
-                        case = (
-                            self.session.query(CourtCase)
-                            .filter_by(
-                                case_number=case_number,
-                                court_identifier=court_identifier,
-                            )
-                            .first()
-                        )
-
-                        if case:
-                            if case.extra_data is None:
-                                case.extra_data = {}
-
-                            if download_success:
-                                case.extra_data["orders_scraped"] = True
-                                case.extra_data["orders_scraped_at"] = (
-                                    datetime.now(KATHMANDU_TZ)
-                                    .replace(tzinfo=None)
-                                    .isoformat()
-                                )
-                                case.extra_data["orders_file_path"] = file_path
-                                # Clear any prior failure state
-                                case.extra_data.pop("orders_failed", None)
-                                case.extra_data.pop("orders_error", None)
-                                case.extra_data.pop("orders_failed_at", None)
-                                # Don't overwrite case.status - it tracks case detail scrape status
-                                flag_modified(case, "extra_data")
-                                info.spider.logger.info(
-                                    f"Updated database: {case_number} - orders_scraped=true"
-                                )
-                            else:
-                                case.extra_data["orders_failed"] = True
-                                case.extra_data["orders_error"] = (
-                                    error_message or "Download failed"
-                                )
-                                case.extra_data["orders_failed_at"] = (
-                                    datetime.now(KATHMANDU_TZ)
-                                    .replace(tzinfo=None)
-                                    .isoformat()
-                                )
-                                # Clear any prior success state
-                                case.extra_data.pop("orders_scraped", None)
-                                case.extra_data.pop("orders_scraped_at", None)
-                                case.extra_data.pop("orders_file_path", None)
-                                flag_modified(case, "extra_data")
-                                info.spider.logger.info(
-                                    f"Updated database: {case_number} - orders_failed=true"
-                                )
-                        else:
-                            info.spider.logger.warning(
-                                f"Case not found in database: {case_number}"
-                            )
-
-            except Exception:
-                info.spider.logger.exception("Error updating database")
-
-        if file_path:
-            metadata = {
-                "case_number": item.get("case_number"),
-                "court_identifier": item.get("court_identifier"),
-                "document_url": item.get("document_url"),
-                "scraped_at": item.get("scraped_at"),
-            }
-
-            files_store = info.spider.settings.get("FILES_STORE")
-
-            # Guard: don't attempt os.makedirs on S3/GS paths
-            if files_store and not files_store.startswith(("s3://", "gs://", "ftp://")):
-                file_dir = os.path.dirname(file_path)
-                metadata_path = os.path.join(files_store, file_dir, "metadata.json")
-
-                try:
-                    os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-                    with open(metadata_path, "w", encoding="utf-8") as f:
-                        json.dump(metadata, f, ensure_ascii=False, indent=2)
-                    info.spider.logger.info(f"Saved metadata: {metadata_path}")
-                except Exception as e:
-                    info.spider.logger.warning(f"Failed to save metadata: {e}")
-            else:
-                # TODO(GitHub #XXX): Implement S3 metadata storage
-                info.spider.logger.debug(
-                    f"Skipping metadata save for remote storage: {files_store}"
-                )
+        # Update database
+        if successful_paths:
+            self._mark_success(
+                info.spider, case_number, court_identifier, successful_paths
+            )
+            info.spider.successful_cases += 1
+        else:
+            # Use spider error if provided, otherwise file upload error
+            error = spider_error or "; ".join(failed_results) or "Unknown failure"
+            self._mark_failed(info.spider, case_number, court_identifier, error)
+            info.spider.failed_cases += 1
 
         return item
+
+    def _mark_success(self, spider, case_number, court_identifier, file_paths):
+        """
+        Mark case as successfully scraped in database.
+
+        Updates extra_data with:
+        - court_orders: List of file paths
+        - court_orders_scraped_at: ISO timestamp
+        - Clears any previous failure state
+
+        Args:
+            spider: Spider instance
+            case_number: Case number (e.g., "082-OA-0503")
+            court_identifier: Court identifier (e.g., "special")
+            file_paths: List of file paths (e.g., ["court-orders/special/082-OA-0503.1.docx"])
+        """
+        with self.session.begin():
+            case = (
+                self.session.query(CourtCase)
+                .filter_by(case_number=case_number, court_identifier=court_identifier)
+                .first()
+            )
+
+            if not case:
+                raise LookupError(
+                    f"Case not found in database. "
+                    f"case_number={case_number!r}, "
+                    f"court_identifier={court_identifier!r}"
+                )
+
+            # Initialize extra_data if needed
+            if case.extra_data is None:
+                case.extra_data = {}
+
+            # Store file paths and timestamp
+            case.extra_data["court_orders"] = file_paths
+            case.extra_data["court_orders_scraped_at"] = (
+                datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+            )
+
+            # Clear any previous failure state
+            case.extra_data.pop("orders_failed", None)
+            case.extra_data.pop("orders_error", None)
+            case.extra_data.pop("orders_failed_at", None)
+
+            # Mark field as modified for SQLAlchemy JSONB tracking
+            flag_modified(case, "extra_data")
+
+    def _mark_failed(self, spider, case_number, court_identifier, error):
+        """
+        Mark case as failed in database.
+
+        Updates extra_data with:
+        - orders_failed: true
+        - orders_error: Error message
+        - orders_failed_at: ISO timestamp
+
+        Failed cases are skipped on next spider run (filtered in _get_cases_to_scrape).
+
+        Args:
+            spider: Spider instance
+            case_number: Case number (e.g., "082-OA-0503")
+            court_identifier: Court identifier (e.g., "special")
+            error: Error message string
+        """
+        with self.session.begin():
+            case = (
+                self.session.query(CourtCase)
+                .filter_by(case_number=case_number, court_identifier=court_identifier)
+                .first()
+            )
+
+            if not case:
+                raise LookupError(
+                    f"Case not found in database. "
+                    f"case_number={case_number!r}, "
+                    f"court_identifier={court_identifier!r}"
+                )
+
+            # Initialize extra_data if needed
+            if case.extra_data is None:
+                case.extra_data = {}
+
+            # Store failure state
+            case.extra_data["orders_failed"] = True
+            case.extra_data["orders_error"] = error
+            case.extra_data["orders_failed_at"] = (
+                datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+            )
+
+            # Mark field as modified for SQLAlchemy JSONB tracking
+            flag_modified(case, "extra_data")
