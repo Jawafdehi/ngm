@@ -96,21 +96,6 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
     - Generates organized file paths: court-orders/{court}/{case}.{n}.{ext}
     - Updates database with file paths in extra_data["court_orders"]
     - Tracks success/failure to skip already-scraped cases on next run
-
-    Storage:
-    - FILES_STORE setting determines storage backend (S3, local filesystem, etc.)
-    - File paths are relative to FILES_STORE root
-
-    Database schema (extra_data JSONB column):
-        Success: {
-            "court_orders": ["court-orders/special/082-OA-0503.1.docx", ...],
-            "court_orders_scraped_at": "2026-03-03T12:48:58"
-        }
-        Failure: {
-            "orders_failed": true,
-            "orders_error": "Results table found but no download links",
-            "orders_failed_at": "2026-03-03T12:49:07"
-        }
     """
 
     def open_spider(self, spider):
@@ -131,6 +116,8 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
         Format: court-orders/{court_identifier}/{case_number}.{n}.{ext}
         Example: court-orders/special/082-OA-0503.1.docx
+
+        Metadata is stored separately in: metadata/{court_identifier}/{case_number}.{n}.json
 
         Args:
             request: Scrapy request object containing the download URL
@@ -155,10 +142,20 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
         # Number files sequentially (.1, .2, .3) for cases with multiple documents
         all_urls = item.get("file_urls", [])
         if request.url not in all_urls:
-            raise ValueError(
+            # Log error but don't crash - return a fallback path
+            court_identifier = item.get("court_identifier", "unknown")
+            case_number_safe = item.get("case_number", "unknown").replace("/", "-")
+            info.spider.logger.error(
                 f"Request URL {request.url!r} not found in item file_urls. "
-                f"Available URLs: {all_urls}"
+                f"Available URLs: {all_urls}. Using fallback path."
             )
+            # Use timestamp as unique identifier for fallback
+            timestamp = datetime.now(KATHMANDU_TZ).strftime("%Y%m%d%H%M%S")
+            ext = os.path.splitext(urlparse(request.url).path)[1] or ".doc"
+            return (
+                f"court-orders/{court_identifier}/{case_number_safe}.{timestamp}{ext}"
+            )
+
         n = all_urls.index(request.url) + 1
 
         # Extract file extension from download URL, fallback to .doc
@@ -215,15 +212,38 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
         # Update database
         if successful_paths:
+            # Get case metadata for JSON files (single DB query)
+            case_metadata = self._get_case_metadata(
+                info.spider, case_number, court_identifier
+            )
+
             self._mark_success(
                 info.spider, case_number, court_identifier, successful_paths
             )
             info.spider.successful_cases += 1
+
+            # Create metadata JSON files (reuse metadata from above, no second query)
+            if case_metadata:
+                self._save_metadata_files(
+                    info.spider,
+                    case_number,
+                    court_identifier,
+                    successful_paths,
+                    case_metadata,
+                )
         else:
-            # Use spider error if provided, otherwise file upload error
-            error = spider_error or "; ".join(failed_results) or "Unknown failure"
-            self._mark_failed(info.spider, case_number, court_identifier, error)
-            info.spider.failed_cases += 1
+            # Check if this is a "no download links" error (temporary failure)
+            if spider_error == "no_download_links":
+                # Increment retry counter instead of marking as failed
+                self._increment_no_docs_count(
+                    info.spider, case_number, court_identifier
+                )
+                # Don't increment failed_cases counter - this is a retry
+            else:
+                # Permanent failure - mark as failed
+                error = spider_error or "; ".join(failed_results) or "Unknown failure"
+                self._mark_failed(info.spider, case_number, court_identifier, error)
+                info.spider.failed_cases += 1
 
         return item
 
@@ -242,37 +262,147 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             court_identifier: Court identifier (e.g., "special")
             file_paths: List of file paths (e.g., ["court-orders/special/082-OA-0503.1.docx"])
         """
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter_by(case_number=case_number, court_identifier=court_identifier)
-                .first()
-            )
-
-            if not case:
-                raise LookupError(
-                    f"Case not found in database. "
-                    f"case_number={case_number!r}, "
-                    f"court_identifier={court_identifier!r}"
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
                 )
 
-            # Initialize extra_data if needed
-            if case.extra_data is None:
-                case.extra_data = {}
+                if not case:
+                    spider.logger.error(
+                        f"[{case_number}] Case not found in database - may have been deleted. "
+                        f"Files saved but database not updated."
+                    )
+                    return
 
-            # Store file paths and timestamp
-            case.extra_data["court_orders"] = file_paths
-            case.extra_data["court_orders_scraped_at"] = (
-                datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                # Initialize extra_data if needed
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                # Store file paths and timestamp
+                case.extra_data["court_orders"] = file_paths
+                case.extra_data["court_orders_scraped_at"] = (
+                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                )
+
+                # Clear any previous failure state
+                case.extra_data.pop("orders_failed", None)
+                case.extra_data.pop("orders_error", None)
+                case.extra_data.pop("orders_failed_at", None)
+
+                # Mark field as modified for SQLAlchemy JSONB tracking
+                flag_modified(case, "extra_data")
+        except Exception as e:
+            spider.logger.exception(
+                f"[{case_number}] Unexpected error marking case as successful: {e}"
             )
 
-            # Clear any previous failure state
-            case.extra_data.pop("orders_failed", None)
-            case.extra_data.pop("orders_error", None)
-            case.extra_data.pop("orders_failed_at", None)
+    def _get_case_metadata(self, spider, case_number, court_identifier):
+        """
+        Query case metadata from database.
 
-            # Mark field as modified for SQLAlchemy JSONB tracking
-            flag_modified(case, "extra_data")
+        Returns case metadata dict or None if case not found.
+        This is called once and the result is reused to avoid duplicate queries.
+
+        Args:
+            spider: Spider instance
+            case_number: Case number (e.g., "082-OA-0503")
+            court_identifier: Court identifier (e.g., "special")
+
+        Returns:
+            dict: Case metadata or None if not found
+        """
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
+
+                if not case:
+                    spider.logger.warning(
+                        f"[{case_number}] Case not found in database for metadata"
+                    )
+                    return None
+
+                # Materialize data inside transaction
+                return {
+                    "case_number": case.case_number,
+                    "court_identifier": case.court_identifier,
+                    "case_status": case.case_status,
+                    "registration_date_bs": case.registration_date_bs,
+                    "registration_date_ad": (
+                        case.registration_date_ad.isoformat()
+                        if case.registration_date_ad
+                        else None
+                    ),
+                    "scraped_at": datetime.now(KATHMANDU_TZ)
+                    .replace(tzinfo=None)
+                    .isoformat(),
+                }
+        except Exception as e:
+            spider.logger.exception(
+                f"[{case_number}] Error querying case metadata: {e}"
+            )
+            return None
+
+    def _save_metadata_files(
+        self, spider, case_number, court_identifier, file_paths, case_metadata
+    ):
+        """
+        Save metadata JSON files in separate metadata/ directory.
+
+        Creates a .json file for each document with case metadata.
+        This allows external tools to access metadata without database queries.
+
+        Args:
+            spider: Spider instance
+            case_number: Case number (e.g., "082-OA-0503")
+            court_identifier: Court identifier (e.g., "special")
+            file_paths: List of document paths (e.g., ["court-orders/special/082-OA-0503.1.docx"])
+            case_metadata: Pre-fetched case metadata dict (avoids duplicate DB query)
+        """
+        files_store = spider.settings.get("FILES_STORE")
+
+        if not case_metadata:
+            spider.logger.warning(
+                f"[{case_number}] No metadata provided - skipping metadata file creation"
+            )
+            return
+
+        # Save metadata JSON for each file in separate metadata/ directory
+        for file_path in file_paths:
+            # Add file-specific info
+            file_metadata = {
+                **case_metadata,
+                "document_path": file_path,
+                "document_name": os.path.basename(file_path),
+            }
+
+            # Convert document path to metadata path
+            # court-orders/special/082-OA-0503.1.docx → metadata/special/082-OA-0503.1.json
+            metadata_relative = file_path.replace("court-orders/", "metadata/", 1)
+            metadata_relative = os.path.splitext(metadata_relative)[0] + ".json"
+            metadata_path = os.path.join(files_store, metadata_relative)
+
+            try:
+                os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                with open(metadata_path, "w", encoding="utf-8") as f:
+                    json.dump(file_metadata, f, ensure_ascii=False, indent=2)
+                spider.logger.info(
+                    f"[{case_number}] Saved metadata: {metadata_relative}"
+                )
+            except Exception as e:
+                spider.logger.error(
+                    f"[{case_number}] Failed to save metadata file: {e}"
+                )
 
     def _mark_failed(self, spider, case_number, court_identifier, error):
         """
@@ -291,30 +421,111 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             court_identifier: Court identifier (e.g., "special")
             error: Error message string
         """
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter_by(case_number=case_number, court_identifier=court_identifier)
-                .first()
-            )
-
-            if not case:
-                raise LookupError(
-                    f"Case not found in database. "
-                    f"case_number={case_number!r}, "
-                    f"court_identifier={court_identifier!r}"
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
                 )
 
-            # Initialize extra_data if needed
-            if case.extra_data is None:
-                case.extra_data = {}
+                if not case:
+                    spider.logger.error(
+                        f"[{case_number}] Case not found in database - may have been deleted. "
+                        f"Cannot mark as failed."
+                    )
+                    return
 
-            # Store failure state
-            case.extra_data["orders_failed"] = True
-            case.extra_data["orders_error"] = error
-            case.extra_data["orders_failed_at"] = (
-                datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                # Initialize extra_data if needed
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                # Store failure state
+                case.extra_data["orders_failed"] = True
+                case.extra_data["orders_error"] = error
+                case.extra_data["orders_failed_at"] = (
+                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                )
+
+                # Mark field as modified for SQLAlchemy JSONB tracking
+                flag_modified(case, "extra_data")
+        except Exception as e:
+            spider.logger.exception(
+                f"[{case_number}] Unexpected error marking case as failed: {e}"
             )
 
-            # Mark field as modified for SQLAlchemy JSONB tracking
-            flag_modified(case, "extra_data")
+    def _increment_no_docs_count(self, spider, case_number, court_identifier):
+        """
+        Increment retry counter for cases with no download links.
+
+        This is used for temporary failures where documents might be added later.
+        Cases with count > 3 are filtered out in spider's _get_cases_to_scrape.
+        When count reaches 3, the case is marked as permanently failed.
+
+        Updates extra_data with:
+        - orders_no_docs_count: Incremented counter
+        - orders_no_docs_last_tried: ISO timestamp
+        - If count reaches 3: marks as failed (orders_failed = true)
+
+        Args:
+            spider: Spider instance
+            case_number: Case number (e.g., "082-OA-0503")
+            court_identifier: Court identifier (e.g., "special")
+        """
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
+
+                if not case:
+                    spider.logger.error(
+                        f"[{case_number}] Case not found in database - may have been deleted. "
+                        f"Cannot increment no_docs counter."
+                    )
+                    return
+
+                # Initialize extra_data if needed
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                # Read existing count and increment
+                existing_count = case.extra_data.get("orders_no_docs_count", 0)
+                new_count = existing_count + 1
+
+                # Update counter and timestamp
+                case.extra_data["orders_no_docs_count"] = new_count
+                case.extra_data["orders_no_docs_last_tried"] = (
+                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                )
+
+                # If we've hit the retry limit, mark as permanently failed
+                if new_count >= 3:
+                    case.extra_data["orders_failed"] = True
+                    case.extra_data["orders_error"] = (
+                        f"No download links found after {new_count} attempts"
+                    )
+                    case.extra_data["orders_failed_at"] = (
+                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
+                    )
+                    spider.logger.warning(
+                        f"[{case_number}] Reached retry limit ({new_count}/3). "
+                        "Marking as permanently failed."
+                    )
+                else:
+                    spider.logger.info(
+                        f"[{case_number}] No download links retry count: {new_count}/3"
+                    )
+
+                # Mark field as modified for SQLAlchemy JSONB tracking
+                flag_modified(case, "extra_data")
+        except Exception as e:
+            spider.logger.exception(
+                f"[{case_number}] Unexpected error incrementing no_docs counter: {e}"
+            )

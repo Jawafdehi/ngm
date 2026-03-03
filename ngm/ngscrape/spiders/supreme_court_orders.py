@@ -7,6 +7,9 @@ Supreme Court Orders Spider
 - Pipeline updates DB: extra_data["court_orders"] = [url1, url2, ...]
 
 Courts: Special (priority 1) -> Supreme (priority 2) only
+
+Concurrency: This spider does not use row-level locking. Only one instance
+should run at a time to avoid duplicate processing. 
 """
 
 import re
@@ -20,7 +23,6 @@ from sqlalchemy import or_
 
 from ngm.database.models import get_engine, get_session, CourtCase
 from ngm.utils.court_mapping import get_court_params
-from ngm.ngscrape.settings import FILES_STORE
 
 import scrapy
 
@@ -35,7 +37,6 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         "ITEM_PIPELINES": {
             "ngm.ngscrape.pipelines.SupremeCourtOrdersPipeline": 1,
         },
-        "FILES_STORE": FILES_STORE,
         "CONCURRENT_REQUESTS": 1,
         "DOWNLOAD_DELAY": 3,
         "DOWNLOAD_TIMEOUT": 60,
@@ -61,7 +62,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if self.limit <= 0:
             raise ValueError(f"limit must be positive, got: {self.limit}")
 
-        db_url = os.getenv("DATABASE_URL")
+        db_url = os.getenv("LOCAL_DATABASE_URL")
         if not db_url:
             raise ValueError("DATABASE_URL environment variable is not set")
 
@@ -119,6 +120,17 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 CourtCase.extra_data.is_(None),
                 CourtCase.extra_data["orders_failed"].astext.is_(None),
                 CourtCase.extra_data["orders_failed"].astext != "true",
+            )
+        )
+
+        # Skip cases with too many "no download links" retries (>3)
+        from sqlalchemy import Integer
+
+        query = query.filter(
+            or_(
+                CourtCase.extra_data.is_(None),
+                CourtCase.extra_data["orders_no_docs_count"].astext.is_(None),
+                CourtCase.extra_data["orders_no_docs_count"].astext.cast(Integer) <= 3,
             )
         )
 
@@ -411,8 +423,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             else:
                 error_msg = "Could not find results table"
 
-            self.logger.warning(f"[{case_number}] {error_msg}.")
+            self.logger.warning(
+                f"[{case_number}] {error_msg}. Marking as permanently failed."
+            )
 
+            # Case doesn't exist on website
+            # Mark as failed so we don't retry
             yield {
                 "file_urls": [],
                 "case_number": case_number,
@@ -426,8 +442,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         tbody = results_table.find("tbody")
         if not tbody:
             error_msg = "Results table has no tbody"
-            self.logger.warning(f"[{case_number}] {error_msg}.")
+            self.logger.warning(
+                f"[{case_number}] {error_msg}. Marking as permanently failed."
+            )
 
+            # Malformed response from website
+            # Mark as failed so we don't retry
             yield {
                 "file_urls": [],
                 "case_number": case_number,
@@ -452,14 +472,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 self.logger.info(f"[{case_number}] Found document URL: {doc_url}")
 
         if not doc_urls:
-            error_msg = "Results table found but no download links"
-            self.logger.warning(f"[{case_number}] {error_msg}.")
+            self.logger.warning(
+                f"[{case_number}] Results table found but no download links. "
+                "Incrementing retry counter."
+            )
 
+            # Yield error item with special flag for retry counter
+            # This is a temporary state (documents might be added later)
             yield {
                 "file_urls": [],
                 "case_number": case_number,
                 "court_identifier": court_identifier,
-                "error": error_msg,
+                "error": "no_download_links",  # special flag, not a permanent failure
             }
 
             yield from self._next_request()
