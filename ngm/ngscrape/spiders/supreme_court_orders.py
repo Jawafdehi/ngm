@@ -28,6 +28,9 @@ import scrapy
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
+# Retry limit for cases with no download links
+RETRY_LIMIT_NO_DOCS = 3
+
 
 class SupremeCourtOrdersSpider(scrapy.Spider):
     name = "supreme_court_orders"
@@ -62,7 +65,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if self.limit <= 0:
             raise ValueError(f"limit must be positive, got: {self.limit}")
 
-        db_url = os.getenv("LOCAL_DATABASE_URL")
+        db_url = os.getenv("DATABASE_URL")
         if not db_url:
             raise ValueError("DATABASE_URL environment variable is not set")
 
@@ -123,14 +126,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
         )
 
-        # Skip cases with too many "no download links" retries (>3)
+        # Skip cases with too many "no download links" retries
         from sqlalchemy import Integer
 
         query = query.filter(
             or_(
                 CourtCase.extra_data.is_(None),
                 CourtCase.extra_data["orders_no_docs_count"].astext.is_(None),
-                CourtCase.extra_data["orders_no_docs_count"].astext.cast(Integer) <= 3,
+                CourtCase.extra_data["orders_no_docs_count"].astext.cast(Integer)
+                < RETRY_LIMIT_NO_DOCS,
             )
         )
 
@@ -325,8 +329,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         self.logger.info(
             f"[{case_number}] Submitting form: court_type={formdata['court_type']}, "
-            f"court_id={formdata['court_id']}, regno={formdata['regno']}, "
-            f"darta_date={formdata['darta_date']}"
+            f"court_id={formdata['court_id']}, regno={formdata['regno']}"
         )
 
         # Use FormRequest directly instead of from_response to ensure empty values are sent
