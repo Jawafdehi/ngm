@@ -395,7 +395,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if captcha:
             self.logger.info(
-                f"[{case_number}] Extracted CAPTCHA: '{captcha}' from homepage response"
+                f"[{case_number}] Extracted CAPTCHA (length={len(captcha)}) from homepage response"
             )
             yield self._submit_form(response, captcha, raw_cookie)
             return
@@ -447,7 +447,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 # Extract raw cookie value to inject manually
                 raw_match = re.search(r"court_session=([^;]+)", val)
                 raw_cookie = raw_match.group(1) if raw_match else None
-                self.logger.debug(f"Extracted CAPTCHA '{captcha}' from {response.url}")
+                self.logger.debug(
+                    f"Extracted CAPTCHA (length={len(captcha)}) from {response.url}"
+                )
                 return captcha, raw_cookie
 
         return None, None
