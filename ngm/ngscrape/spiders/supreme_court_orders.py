@@ -4,7 +4,7 @@ Supreme Court Orders Spider
 - Find document URL via CAPTCHA-protected search form
 - Yield {"file_urls": [...], "case_number": ..., "court_identifier": ...}
 - FilesPipeline handles download + S3 upload
-- Pipeline updates DB: extra_data["court_orders"] = [url1, url2, ...]
+- Pipeline updates DB: extra_data["court_orders"] = ["court-orders/special/082-OA-0503.1.docx", ...]
 
 Courts: Special (priority 1) -> Supreme (priority 2) only
 """
@@ -78,9 +78,23 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 "LOCAL_DATABASE_URL or DATABASE_URL environment variable must be set"
             )
 
+        # Determine which env var was used
+        db_source = (
+            "LOCAL_DATABASE_URL" if os.getenv("LOCAL_DATABASE_URL") else "DATABASE_URL"
+        )
+
+        # Redact credentials from URL for logging
         parsed = urlparse(db_url)
-        username = parsed.username[:2] + "**" if parsed.username else "**"
-        self.logger.info(f"DATABASE_URL set (user={username})")
+        if parsed.username or parsed.password:
+            # Replace userinfo with <redacted>
+            redacted_netloc = f"<redacted>@{parsed.hostname}"
+            if parsed.port:
+                redacted_netloc += f":{parsed.port}"
+        else:
+            redacted_netloc = parsed.netloc
+
+        redacted_url = f"{parsed.scheme}://{redacted_netloc}{parsed.path}"
+        self.logger.info(f"Using {db_source}: {redacted_url}")
 
         self.engine = get_engine(db_url)
         self.session = get_session(self.engine)
@@ -93,6 +107,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """
         Check if case is old enough for documents to be available.
         Returns True if last hearing >= MIN_DAYS_FOR_DOCUMENTS days ago.
+        Returns False if hearing data is missing (soft-skip instead of permanent failure).
 
         Args:
             last_hearing_date: Date of last hearing (datetime.date, str, or None)
@@ -100,9 +115,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         """
         if not last_hearing_date:
             self.logger.warning(
-                f"[{case_number}] No hearing data, treating as old enough"
+                f"[{case_number}] No hearing data available, treating as too recent (soft-skip)"
             )
-            return True
+            return False  # Soft-skip instead of permanent failure
 
         # Handle potential string serialization from Scrapy meta
         if isinstance(last_hearing_date, str):
@@ -267,7 +282,6 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
 
         cases = self._get_cases_to_scrape()
-        self.total_cases = len(cases)
 
         if not cases:
             self.logger.warning("No cases found to scrape")
@@ -296,6 +310,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 }
             )
 
+        # Set total_cases after filtering to reflect actual cases to process
+        self.total_cases = len(self._pending_cases)
         self.logger.info(f"Starting to process {self.total_cases} cases")
         yield from self._next_request()
 
@@ -457,9 +473,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             f"court_session={'SET' if court_session_cookie else 'MISSING'}"
         )
 
-        # Store submitted captcha in meta for debugging
+        # Store CAPTCHA metadata (not raw value) for debugging
         meta = response.meta.copy()
-        meta["submitted_captcha"] = captcha_solution
+        meta["submitted_captcha_length"] = len(captcha_solution)
 
         # Inject court_session directly — bypasses Scrapy's cookie jar entirely
         # Scrapy drops duplicate cookies, so we manage this cookie manually
@@ -523,14 +539,14 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             error_text = error_table.get_text(strip=True)
 
             if "Invalid CAPTCHA" in error_text:
-                # DEBUG: Extract what CAPTCHA was expected from current response
-                submitted_captcha = response.meta.get("submitted_captcha", "UNKNOWN")
+                # DEBUG: Check if we had submitted a CAPTCHA and if server issued a new one
+                had_captcha = "submitted_captcha_length" in response.meta
                 current_cookie_captcha, _ = self._extract_captcha(response)
 
                 self.logger.error(
                     f"[{case_number}] Invalid CAPTCHA "
-                    f"(submitted='{submitted_captcha}', "
-                    f"server_new_captcha='{current_cookie_captcha}')"
+                    f"(submitted={'yes' if had_captcha else 'no'}, "
+                    f"server_issued_new={'yes' if current_cookie_captcha else 'no'})"
                 )
 
                 if captcha_retry_count < self.MAX_CAPTCHA_RETRIES:
@@ -622,6 +638,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             return
 
         doc_urls = []
+        seen = set()
         for row in tbody.find_all("tr"):
             cells = row.find_all("td")
 
@@ -631,8 +648,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             link = cells[9].find("a", class_="download_content")
             if link and link.get("href"):
                 doc_url = urljoin(response.url, link["href"])
-                doc_urls.append(doc_url)
-                self.logger.info(f"[{case_number}] Found document URL: {doc_url}")
+                # Deduplicate URLs (order-preserving)
+                if doc_url not in seen:
+                    seen.add(doc_url)
+                    doc_urls.append(doc_url)
+                    self.logger.info(f"[{case_number}] Found document URL: {doc_url}")
 
         if not doc_urls:
             # Get last hearing date from meta (fetched in _get_cases_to_scrape)
