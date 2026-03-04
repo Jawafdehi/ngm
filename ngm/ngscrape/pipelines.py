@@ -296,9 +296,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 # Mark field as modified for SQLAlchemy JSONB tracking
                 flag_modified(case, "extra_data")
                 return True
-        except Exception as e:
+        except Exception:
             spider.logger.exception(
-                f"[{case_number}] Unexpected error marking case as successful: {e}"
+                f"[{case_number}] Unexpected error marking case as successful"
             )
             raise  # Re-raise to fail fast on DB errors
 
@@ -337,8 +337,8 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                     f"[{case_number}] Marked too_recent. "
                     f"Will re-check in {TOO_RECENT_RECHECK_DAYS} days."
                 )
-        except Exception as e:
-            spider.logger.exception(f"[{case_number}] Error marking too_recent: {e}")
+        except Exception:
+            spider.logger.exception(f"[{case_number}] Error marking too_recent")
             raise
 
     def _mark_failed(self, spider, case_number, court_identifier, error):
@@ -369,6 +369,6 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 case.extra_data["orders_failed_at"] = self._now_iso()
 
                 flag_modified(case, "extra_data")
-        except Exception as e:
-            spider.logger.exception(f"[{case_number}] Error marking failed: {e}")
+        except Exception:
+            spider.logger.exception(f"[{case_number}] Error marking failed")
             raise

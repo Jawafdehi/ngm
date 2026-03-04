@@ -312,13 +312,16 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             f"(court={case_data['court_identifier']})"
         )
 
+        # Pick UA once per case and apply to all requests (homepage, redirects, form)
+        ua = random.choice(USER_AGENTS)  # noqa: S311
         yield scrapy.Request(
             url="https://supremecourt.gov.np/cp/",
             callback=self.parse,
+            headers={"User-Agent": ua},
             meta={
                 **case_data,
                 "handle_httpstatus_list": [301, 302],
-                "user_agent": random.choice(USER_AGENTS),  # Pick once per case
+                "user_agent": ua,
             },
             dont_filter=True,
         )
@@ -362,6 +365,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             yield scrapy.Request(
                 url=urljoin(response.url, location.decode("utf-8")),
                 callback=self.parse,
+                headers={
+                    "User-Agent": meta.get("user_agent", self.settings["USER_AGENT"])
+                },
                 meta={**meta, "handle_httpstatus_list": [301, 302]},
                 dont_filter=True,
             )
@@ -386,6 +392,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 f"set_cookie_count={len(response.headers.getlist(b'Set-Cookie'))}). "
                 f"Retry {retry_count + 1}/{self.MAX_HOMEPAGE_RETRIES}"
             )
+
             meta = response.meta.copy()
             meta["retry_count"] = retry_count + 1
             meta.pop("captcha_solution", None)
@@ -393,6 +400,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             yield scrapy.Request(
                 url="https://supremecourt.gov.np/cp/",
                 callback=self.parse,
+                headers={
+                    "User-Agent": meta.get("user_agent", self.settings["USER_AGENT"])
+                },
                 meta=meta,
                 dont_filter=True,
             )
@@ -498,6 +508,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             yield scrapy.Request(
                 url=urljoin(response.url, location.decode("utf-8")),
                 callback=self.parse_results,
+                headers={
+                    "User-Agent": meta.get("user_agent", self.settings["USER_AGENT"])
+                },
                 meta={**meta, "handle_httpstatus_list": [301, 302]},
                 dont_filter=True,
             )
@@ -543,6 +556,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     yield scrapy.Request(
                         url="https://supremecourt.gov.np/cp/",
                         callback=self.parse,
+                        headers={
+                            "User-Agent": meta.get(
+                                "user_agent", self.settings["USER_AGENT"]
+                            )
+                        },
                         meta=meta,
                         dont_filter=True,
                     )
@@ -670,8 +688,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 self.session.close()
             if hasattr(self, "engine") and self.engine:
                 self.engine.dispose()
-        except Exception as e:
-            self.logger.exception(f"Error during spider cleanup: {e}")
+        except Exception:
+            self.logger.exception("Error during spider cleanup")
 
         self.logger.info(
             f"Spider closed: {reason} | "
