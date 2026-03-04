@@ -214,6 +214,12 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
         # Update database
         if successful_paths:
+            if failed_results:
+                info.spider.logger.warning(
+                    f"[{case_number}] Partial download: {len(successful_paths)} succeeded, "
+                    f"{len(failed_results)} failed and will not be retried. "
+                    f"Failures: {'; '.join(failed_results)}"
+                )
             self._mark_success(
                 info.spider, case_number, court_identifier, successful_paths
             )
