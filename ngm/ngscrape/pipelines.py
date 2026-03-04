@@ -10,8 +10,11 @@ from ngm.database.models import CourtCase
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
-# Retry limit for cases with no document_url download links for Supreme_court_orders spider
-RETRY_LIMIT_NO_DOCS = 3
+# Days since last hearing before documents are expected on the site
+MIN_DAYS_FOR_DOCUMENTS = 400
+
+# How often to re-check soft-skipped cases
+TOO_RECENT_RECHECK_DAYS = 30
 
 
 class KanunPatrikaPipeline(FilesPipeline):
@@ -95,11 +98,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
     """
     Pipeline for Supreme Court order documents.
 
-    Responsibilities:
-    - Downloads files using Scrapy's FilesPipeline (storage backend configured via FILES_STORE setting)
-    - Generates organized file paths: court-orders/{court}/{case}.{n}.{ext}
-    - Updates database with file paths in extra_data["court_orders"]
-    - Tracks success/failure to skip already-scraped cases on next run
+    Item error flags from spider:
+    "too_recent"   → soft skip, re-check in TOO_RECENT_RECHECK_DAYS days
+    anything else  → permanent failure
     """
 
     def open_spider(self, spider):
@@ -113,6 +114,10 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             )
 
         self.session = spider.session
+
+    def _now_iso(self):
+        """Return current timestamp in Kathmandu timezone as ISO string."""
+        return datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
 
     def file_path(self, request, response=None, info=None, *, item=None):
         """
@@ -145,8 +150,6 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
         all_urls = item.get("file_urls", [])
         if request.url not in all_urls:
             # Log error but don't crash - return a fallback path
-            court_identifier = item.get("court_identifier", "unknown")
-            case_number_safe = item.get("case_number", "unknown").replace("/", "-")
             info.spider.logger.error(
                 f"Request URL {request.url!r} not found in item file_urls. "
                 f"Available URLs: {all_urls}. Using fallback path."
@@ -215,19 +218,15 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 info.spider, case_number, court_identifier, successful_paths
             )
             info.spider.successful_cases += 1
+        elif spider_error == "too_recent":
+            # Recent case — soft skip, pipeline will re-check in TOO_RECENT_RECHECK_DAYS days
+            self._mark_too_recent(info.spider, case_number, court_identifier)
+            # Not a failure — do not increment failed_cases
         else:
-            # Check if this is a "no download links" error (temporary failure)
-            if spider_error == "no_download_links":
-                # Increment retry counter instead of marking as failed
-                self._increment_no_docs_count(
-                    info.spider, case_number, court_identifier
-                )
-                # Don't increment failed_cases counter - this is a retry
-            else:
-                # Permanent failure - mark as failed
-                error = spider_error or "; ".join(failed_results) or "Unknown failure"
-                self._mark_failed(info.spider, case_number, court_identifier, error)
-                info.spider.failed_cases += 1
+            # Everything else: no docs on old case (no_docs_old_case), S3 download fail → permanent
+            error = spider_error or "; ".join(failed_results) or "Unknown failure"
+            self._mark_failed(info.spider, case_number, court_identifier, error)
+            info.spider.failed_cases += 1
 
         return item
 
@@ -269,18 +268,14 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
                 # Store file paths and timestamp
                 case.extra_data["court_orders"] = file_paths
-                case.extra_data["court_orders_scraped_at"] = (
-                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                )
+                case.extra_data["court_orders_scraped_at"] = self._now_iso()
 
-                # Clear any previous failure state
+                # Clear all previous state
                 case.extra_data.pop("orders_failed", None)
                 case.extra_data.pop("orders_error", None)
                 case.extra_data.pop("orders_failed_at", None)
-
-                # Clear retry counter on success
-                case.extra_data.pop("orders_no_docs_count", None)
-                case.extra_data.pop("orders_no_docs_last_tried", None)
+                case.extra_data.pop("orders_too_recent", None)
+                case.extra_data.pop("orders_too_recent_checked_at", None)
 
                 # Mark field as modified for SQLAlchemy JSONB tracking
                 flag_modified(case, "extra_data")
@@ -288,23 +283,50 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             spider.logger.exception(
                 f"[{case_number}] Unexpected error marking case as successful: {e}"
             )
+            raise  # Re-raise to fail fast on DB errors
+
+    def _mark_too_recent(self, spider, case_number, court_identifier):
+        """
+        Soft-skip: case is too recent for documents to be available yet.
+
+        Writes orders_too_recent=true and orders_too_recent_checked_at=now.
+        Selection query will re-pick this case after TOO_RECENT_RECHECK_DAYS days.
+        Once a document appears, _mark_success clears these fields.
+        """
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
+
+                if not case:
+                    spider.logger.error(
+                        f"[{case_number}] Not in DB. Cannot mark as too_recent."
+                    )
+                    return
+
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                case.extra_data["orders_too_recent"] = True
+                case.extra_data["orders_too_recent_checked_at"] = self._now_iso()
+
+                flag_modified(case, "extra_data")
+                spider.logger.info(
+                    f"[{case_number}] Marked too_recent. "
+                    f"Will re-check in {TOO_RECENT_RECHECK_DAYS} days."
+                )
+        except Exception as e:
+            spider.logger.exception(f"[{case_number}] Error marking too_recent: {e}")
+            raise
 
     def _mark_failed(self, spider, case_number, court_identifier, error):
         """
-        Mark case as failed in database.
-
-        Updates extra_data with:
-        - orders_failed: true
-        - orders_error: Error message
-        - orders_failed_at: ISO timestamp
-
-        Failed cases are skipped on next spider run (filtered in _get_cases_to_scrape).
-
-        Args:
-            spider: Spider instance
-            case_number: Case number (e.g., "082-OA-0503")
-            court_identifier: Court identifier (e.g., "special")
-            error: Error message string
+        Permanent failure — excluded from all future runs unless manually cleared.
         """
         try:
             with self.session.begin():
@@ -318,99 +340,18 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
                 if not case:
                     spider.logger.error(
-                        f"[{case_number}] Case not found in database - may have been deleted. "
-                        f"Cannot mark as failed."
+                        f"[{case_number}] Not in DB. Cannot mark as failed."
                     )
                     return
 
-                # Initialize extra_data if needed
                 if case.extra_data is None:
                     case.extra_data = {}
 
-                # Store failure state
                 case.extra_data["orders_failed"] = True
                 case.extra_data["orders_error"] = error
-                case.extra_data["orders_failed_at"] = (
-                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                )
+                case.extra_data["orders_failed_at"] = self._now_iso()
 
-                # Mark field as modified for SQLAlchemy JSONB tracking
                 flag_modified(case, "extra_data")
         except Exception as e:
-            spider.logger.exception(
-                f"[{case_number}] Unexpected error marking case as failed: {e}"
-            )
-
-    def _increment_no_docs_count(self, spider, case_number, court_identifier):
-        """
-        Increment retry counter for cases with no download links.
-
-        This is used for temporary failures where documents might be added later.
-        Cases with count > RETRY_LIMIT_NO_DOCS are filtered out in spider's _get_cases_to_scrape.
-        When count reaches RETRY_LIMIT_NO_DOCS, the case is marked as permanently failed.
-
-        Updates extra_data with:
-        - orders_no_docs_count: Incremented counter
-        - orders_no_docs_last_tried: ISO timestamp
-        - If count reaches RETRY_LIMIT_NO_DOCS: marks as failed (orders_failed = true)
-
-        Args:
-            spider: Spider instance
-            case_number: Case number (e.g., "082-OA-0503")
-            court_identifier: Court identifier (e.g., "special")
-        """
-        try:
-            with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter_by(
-                        case_number=case_number, court_identifier=court_identifier
-                    )
-                    .first()
-                )
-
-                if not case:
-                    spider.logger.error(
-                        f"[{case_number}] Case not found in database - may have been deleted. "
-                        f"Cannot increment no_docs counter."
-                    )
-                    return
-
-                # Initialize extra_data if needed
-                if case.extra_data is None:
-                    case.extra_data = {}
-
-                # Read existing count and increment
-                existing_count = case.extra_data.get("orders_no_docs_count", 0)
-                new_count = existing_count + 1
-
-                # Update counter and timestamp
-                case.extra_data["orders_no_docs_count"] = new_count
-                case.extra_data["orders_no_docs_last_tried"] = (
-                    datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                )
-
-                # If we've hit the retry limit, mark as permanently failed
-                if new_count >= RETRY_LIMIT_NO_DOCS:
-                    case.extra_data["orders_failed"] = True
-                    case.extra_data["orders_error"] = (
-                        f"No download links found after {new_count} attempts"
-                    )
-                    case.extra_data["orders_failed_at"] = (
-                        datetime.now(KATHMANDU_TZ).replace(tzinfo=None).isoformat()
-                    )
-                    spider.logger.warning(
-                        f"[{case_number}] Reached retry limit ({new_count}/{RETRY_LIMIT_NO_DOCS}). "
-                        "Marking as permanently failed."
-                    )
-                else:
-                    spider.logger.info(
-                        f"[{case_number}] No download links retry count: {new_count}/{RETRY_LIMIT_NO_DOCS}"
-                    )
-
-                # Mark field as modified for SQLAlchemy JSONB tracking
-                flag_modified(case, "extra_data")
-        except Exception as e:
-            spider.logger.exception(
-                f"[{case_number}] Unexpected error incrementing no_docs counter: {e}"
-            )
+            spider.logger.exception(f"[{case_number}] Error marking failed: {e}")
+            raise

@@ -25,7 +25,7 @@ _logger = logging.getLogger(__name__)
 # Direct mapping for courts that don't need a numeric ID
 COURT_TYPE_MAP = {
     "supreme": ("S", "264"),  # Supreme Court requires court_id=264
-    "special": ("T", ""),
+    "special": ("T", "116"),
 }
 
 # Build high court mapping using explicit site_id from court_ids.py
@@ -129,7 +129,7 @@ def get_court_identifier(court_type: str, court_id: str) -> str:
         ValueError: If the combination is not recognised
 
     Examples:
-        >>> get_court_identifier('S', '')
+        >>> get_court_identifier('S', '264')
         'supreme'
         >>> get_court_identifier('A', '1')
         'biratnagarhc'
