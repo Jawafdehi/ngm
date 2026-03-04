@@ -108,7 +108,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if isinstance(last_hearing_date, str):
             last_hearing_date = date.fromisoformat(last_hearing_date)
 
-        days_since = (datetime.now().date() - last_hearing_date).days
+        days_since = (datetime.now(KATHMANDU_TZ).date() - last_hearing_date).days
         is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENTS
 
         self.logger.info(
@@ -383,7 +383,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 f"[{case_number}] No CAPTCHA found on {response.url} "
                 f"(status={response.status}, "
                 f"redirect_hops={response.meta.get('redirect_hops', 0)}, "
-                f"set-cookie headers={[h.decode('utf-8', errors='ignore')[:80] for h in response.headers.getlist(b'Set-Cookie')]}). "
+                f"set_cookie_count={len(response.headers.getlist(b'Set-Cookie'))}). "
                 f"Retry {retry_count + 1}/{self.MAX_HOMEPAGE_RETRIES}"
             )
             meta = response.meta.copy()
@@ -443,7 +443,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.logger.info(
             f"[{case_number}] Submitting form: court_type={formdata['court_type']}, "
             f"court_id={formdata['court_id']}, regno={formdata['regno']}, "
-            f"captcha='{captcha_solution}', "
+            "captcha='REDACTED', "
             f"court_session={'SET' if court_session_cookie else 'MISSING'}"
         )
 

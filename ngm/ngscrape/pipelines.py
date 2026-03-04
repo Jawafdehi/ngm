@@ -224,6 +224,13 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 info.spider, case_number, court_identifier, successful_paths
             ):
                 info.spider.successful_cases += 1
+            else:
+                # Case not found in DB - files saved to S3 but DB not updated
+                info.spider.logger.error(
+                    f"[{case_number}] DB persistence failed (case not found). "
+                    f"Files saved to S3 but not tracked in database."
+                )
+                info.spider.failed_cases += 1
         elif spider_error == "too_recent":
             # Recent case — soft skip, pipeline will re-check in TOO_RECENT_RECHECK_DAYS days
             self._mark_too_recent(info.spider, case_number, court_identifier)
