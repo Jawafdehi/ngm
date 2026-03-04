@@ -12,7 +12,7 @@ Database identifiers:
 
 Website parameters:
     - court_type: S (Supreme), T (Special), A (High), D (District)
-    - court_id:   Numeric ID for high/district courts, empty for supreme/special
+    - court_id:   "264" for Supreme, "116" for Special, numeric ID for high/district courts
 """
 
 from typing import Tuple
@@ -90,9 +90,9 @@ def get_court_params(court_identifier: str) -> Tuple[str, str]:
 
     Examples:
         >>> get_court_params('supreme')
-        ('S', '')
+        ('S', '264')
         >>> get_court_params('special')
-        ('T', '')
+        ('T', '116')
         >>> get_court_params('biratnagarhc')
         ('A', '1')
         >>> get_court_params('kathmandudc')
@@ -131,15 +131,25 @@ def get_court_identifier(court_type: str, court_id: str) -> str:
     Examples:
         >>> get_court_identifier('S', '264')
         'supreme'
+        >>> get_court_identifier('T', '116')
+        'special'
         >>> get_court_identifier('A', '1')
         'biratnagarhc'
         >>> get_court_identifier('D', '39')
         'kathmandudc'
     """
     if court_type == "S":
+        if court_id not in ("", "264"):
+            raise ValueError(
+                f"Invalid Supreme court ID: '{court_id}' (expected '' or '264')"
+            )
         return "supreme"
 
     if court_type == "T":
+        if court_id not in ("", "116"):
+            raise ValueError(
+                f"Invalid Special court ID: '{court_id}' (expected '' or '116')"
+            )
         return "special"
 
     if court_type == "A":

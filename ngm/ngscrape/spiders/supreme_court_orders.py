@@ -72,9 +72,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if self.limit <= 0:
             raise ValueError(f"limit must be positive, got: {self.limit}")
 
-        db_url = os.getenv("LOCAL_DATABASE_URL")
+        db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
         if not db_url:
-            raise ValueError("DATABASE_URL environment variable is not set")
+            raise ValueError(
+                "LOCAL_DATABASE_URL or DATABASE_URL environment variable must be set"
+            )
 
         parsed = urlparse(db_url)
         username = parsed.username[:2] + "**" if parsed.username else "**"
@@ -305,15 +307,19 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if response.status in (301, 302):
             if redirect_hops >= 10:
-                raise ValueError(
-                    f"[{case_number}] Too many redirect hops ({redirect_hops})"
+                self.logger.error(
+                    f"[{case_number}] Too many redirect hops ({redirect_hops}). Skipping case."
                 )
+                yield from self._next_request()
+                return
 
             location = response.headers.get("Location")
             if not location:
-                raise ValueError(
-                    f"[{case_number}] Redirect response missing Location header"
+                self.logger.error(
+                    f"[{case_number}] Redirect response missing Location header. Skipping case."
                 )
+                yield from self._next_request()
+                return
 
             meta = response.meta.copy()
             meta["redirect_hops"] = redirect_hops + 1
@@ -445,14 +451,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if response.status in (301, 302):
             if redirect_hops >= 10:
-                raise ValueError(
-                    f"[{case_number}] Too many redirects in results ({redirect_hops})"
+                self.logger.error(
+                    f"[{case_number}] Too many redirects in results ({redirect_hops}). Skipping case."
                 )
+                yield from self._next_request()
+                return
             location = response.headers.get("Location")
             if not location:
-                raise ValueError(
-                    f"[{case_number}] Results redirect missing Location header"
+                self.logger.error(
+                    f"[{case_number}] Results redirect missing Location header. Skipping case."
                 )
+                yield from self._next_request()
+                return
             meta = response.meta.copy()
             meta["redirect_hops"] = redirect_hops + 1
             yield scrapy.Request(
@@ -544,9 +554,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             "table", class_="table table-bordered sc-table"
         ) or soup.find("table", class_="table")
         if not results_table:
-            # Could be temporary error (server issue, timeout, malformed response)
+            # Valid results page (heading found) but table structure missing
             self.logger.warning(
-                f"[{case_number}] Could not find results table. "
+                f"[{case_number}] Valid results page but table structure missing. "
                 "Might be temporary server issue. Will retry next run."
             )
             # Don't yield error item - just skip and retry next run
