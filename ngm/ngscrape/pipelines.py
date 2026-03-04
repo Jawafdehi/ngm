@@ -220,10 +220,10 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                     f"{len(failed_results)} failed and will not be retried. "
                     f"Failures: {'; '.join(failed_results)}"
                 )
-            self._mark_success(
+            if self._mark_success(
                 info.spider, case_number, court_identifier, successful_paths
-            )
-            info.spider.successful_cases += 1
+            ):
+                info.spider.successful_cases += 1
         elif spider_error == "too_recent":
             # Recent case — soft skip, pipeline will re-check in TOO_RECENT_RECHECK_DAYS days
             self._mark_too_recent(info.spider, case_number, court_identifier)
@@ -250,6 +250,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             case_number: Case number (e.g., "082-OA-0503")
             court_identifier: Court identifier (e.g., "special")
             file_paths: List of file paths (e.g., ["court-orders/special/082-OA-0503.1.docx"])
+
+        Returns:
+            bool: True if database update succeeded, False if case not found
         """
         try:
             with self.session.begin():
@@ -266,7 +269,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                         f"[{case_number}] Case not found in database - may have been deleted. "
                         f"Files saved but database not updated."
                     )
-                    return
+                    return False
 
                 # Initialize extra_data if needed
                 if case.extra_data is None:
@@ -285,6 +288,7 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
 
                 # Mark field as modified for SQLAlchemy JSONB tracking
                 flag_modified(case, "extra_data")
+                return True
         except Exception as e:
             spider.logger.exception(
                 f"[{case_number}] Unexpected error marking case as successful: {e}"

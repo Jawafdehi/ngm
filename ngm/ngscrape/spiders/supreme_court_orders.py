@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, date
 from urllib.parse import urljoin, urlparse, unquote
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
-from sqlalchemy import or_, case as sql_case
+from sqlalchemy import or_, case as sql_case, and_, func, tuple_
 
 from ngm.database.models import get_engine, get_session, CourtCase, CourtCaseHearing
 from ngm.utils.court_mapping import get_court_params
@@ -169,10 +169,20 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         query = query.filter(
             or_(
+                # Case has no too_recent marker
                 CourtCase.extra_data.is_(None),
                 CourtCase.extra_data["orders_too_recent"].astext.is_(None),
-                CourtCase.extra_data["orders_too_recent_checked_at"].astext
-                < recheck_cutoff,
+                # Case is marked too_recent but ready for recheck
+                and_(
+                    CourtCase.extra_data["orders_too_recent"].astext == "true",
+                    or_(
+                        CourtCase.extra_data["orders_too_recent_checked_at"].astext.is_(
+                            None
+                        ),
+                        CourtCase.extra_data["orders_too_recent_checked_at"].astext
+                        < recheck_cutoff,
+                    ),
+                ),
             )
         )
 
@@ -195,24 +205,44 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
 
             # Materialize data inside transaction to avoid lazy loading errors
-            # Also fetch last hearing date for each case (for thread-safe age checking)
-            result = []
-            for case in cases:
-                # Get most recent hearing date for this case
-                most_recent_hearing = (
-                    self.session.query(CourtCaseHearing)
-                    .filter_by(
-                        case_number=case.case_number,
-                        court_identifier=case.court_identifier,
+            # Fetch all last hearing dates in one query to avoid N+1
+            case_numbers = [(c.case_number, c.court_identifier) for c in cases]
+
+            if case_numbers:
+                # Subquery to get most recent hearing per case
+                subq = (
+                    self.session.query(
+                        CourtCaseHearing.case_number,
+                        CourtCaseHearing.court_identifier,
+                        func.max(CourtCaseHearing.hearing_date_ad).label(
+                            "last_hearing_date"
+                        ),
                     )
-                    .order_by(CourtCaseHearing.hearing_date_ad.desc())
-                    .first()
+                    .filter(
+                        tuple_(
+                            CourtCaseHearing.case_number,
+                            CourtCaseHearing.court_identifier,
+                        ).in_(case_numbers)
+                    )
+                    .group_by(
+                        CourtCaseHearing.case_number,
+                        CourtCaseHearing.court_identifier,
+                    )
+                    .all()
                 )
 
-                last_hearing_date = (
-                    most_recent_hearing.hearing_date_ad
-                    if most_recent_hearing and most_recent_hearing.hearing_date_ad
-                    else None
+                # Build lookup dict
+                hearing_dates = {
+                    (row.case_number, row.court_identifier): row.last_hearing_date
+                    for row in subq
+                }
+            else:
+                hearing_dates = {}
+
+            result = []
+            for case in cases:
+                last_hearing_date = hearing_dates.get(
+                    (case.case_number, case.court_identifier)
                 )
 
                 result.append(
