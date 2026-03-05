@@ -49,7 +49,7 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
     """Pipeline for downloading CIAA Annual Reports PDF files with metadata."""
 
     def file_path(self, request, response=None, info=None, *, item=None):
-        """Generate custom file path based on metadata with PDFs in pdf/ subdirectory."""
+        """Generate custom file path based on metadata."""
         metadata = item.get("metadata", {})
         file_id = request.url.split("/")[-1].replace(".pdf", "")
 
@@ -61,116 +61,53 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
                 c for c in title if c.isalnum() or c in (" ", "-", "_")
             ).strip()
             if safe_title:
-                # Store PDFs in pdf/ subdirectory
                 return f"pdf/{serial_number}. {safe_title} - {file_id}.pdf"
 
-        # Store PDFs in pdf/ subdirectory
         return f"pdf/{file_id}.pdf"
 
     def item_completed(self, results, item, info):
-        """
-        Save JSON metadata and log upload results for CIAA annual reports.
-
-        Creates JSON metadata files alongside PDFs, storing them in the metadata/
-        subdirectory. Supports both local filesystem and S3/R2 remote storage.
-
-        Args:
-            results: List of (success, result_dict) tuples from file downloads
-            item: The scraped item containing metadata and file URLs
-            info: Spider information object with settings and logger
-
-        Returns:
-            The processed item with upload status logged
-        """
+        """Save simplified metadata and log download results."""
         metadata = item.get("metadata", {})
         files_store = info.spider.settings.get("FILES_STORE")
+
+        if not files_store or not files_store.strip():
+            raise ValueError("FILES_STORE setting is not configured or empty")
+
+        file_path = None
 
         for ok, result in results:
             if ok:
                 file_path = result["path"]
-                info.spider.logger.info(f"Uploaded: {file_path}")
-
-                # Save JSON metadata in metadata/ subdirectory
-                if metadata and file_path.endswith(".pdf"):
-                    simple_meta = {
-                        "serial_number": metadata.get("serial_number", ""),
-                        "date": metadata.get("date", ""),
-                        "title": metadata.get("title", ""),
-                        "file_name": os.path.basename(file_path),
-                    }
-
-                    # Replace pdf/ with metadata/ and .pdf with .json
-                    json_file_path = file_path.replace("pdf/", "metadata/").replace(
-                        ".pdf", ".json"
-                    )
-
-                    # Check if FILES_STORE is remote (S3/R2)
-                    if files_store and files_store.startswith("s3://"):
-                        # For S3/R2, upload JSON using boto3 directly
-                        try:
-                            import boto3
-
-                            # Parse S3 URL
-                            parsed_store = urlparse(files_store)
-                            bucket_name = parsed_store.netloc
-                            prefix = parsed_store.path.lstrip("/")
-
-                            # Construct full S3 key (use forward slashes for S3, not os.path.join)
-                            s3_key = (
-                                f"{prefix}/{json_file_path}"
-                                if prefix
-                                else json_file_path
-                            )
-
-                            # Get S3 client with custom endpoint if configured
-                            s3_config = {
-                                "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
-                                "aws_secret_access_key": os.getenv(
-                                    "AWS_SECRET_ACCESS_KEY"
-                                ),
-                                "region_name": os.getenv("AWS_REGION", "auto"),
-                            }
-
-                            endpoint_url = os.getenv("AWS_ENDPOINT_URL")
-                            if endpoint_url:
-                                s3_config["endpoint_url"] = endpoint_url
-
-                            s3_client = boto3.client("s3", **s3_config)
-
-                            # Upload JSON to S3
-                            json_content = json.dumps(
-                                simple_meta, ensure_ascii=False, indent=2
-                            )
-                            s3_client.put_object(
-                                Bucket=bucket_name,
-                                Key=s3_key,
-                                Body=json_content.encode("utf-8"),
-                                ContentType="application/json",
-                            )
-
-                            info.spider.logger.info(f"Uploaded: {json_file_path}")
-                        except Exception as e:
-                            info.spider.logger.exception(
-                                f"Failed to upload JSON metadata to S3: {e}"
-                            )
-                    elif files_store and files_store.startswith(("gs://", "ftp://")):
-                        info.spider.logger.warning(
-                            f"JSON metadata upload is not implemented for store: {files_store}"
-                        )
-                    else:
-                        # For local filesystem
-                        try:
-                            metadata_path = os.path.join(files_store, json_file_path)
-                            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-                            with open(metadata_path, "w", encoding="utf-8") as f:
-                                json.dump(simple_meta, f, ensure_ascii=False, indent=2)
-                            info.spider.logger.info(f"Uploaded: {json_file_path}")
-                        except Exception as e:
-                            info.spider.logger.warning(
-                                f"Failed to save JSON metadata locally: {e}"
-                            )
+                info.spider.logger.info(f"Downloaded: {file_path}")
             else:
-                info.spider.logger.error(f"Failed to upload: {result}")
+                error_msg = result.get("error", "Unknown error")
+                info.spider.logger.error(
+                    f"Failed to download {item['file_urls'][0]}: {error_msg}"
+                )
+
+        if metadata and file_path:
+            simple_meta = {
+                "serial_number": metadata.get("serial_number", ""),
+                "date": metadata.get("date", ""),
+                "title": metadata.get("title", ""),
+                "file_name": os.path.basename(file_path),
+            }
+
+            # Replace pdf/ with metadata/ and .pdf with .json
+            json_file_path = file_path.replace("pdf/", "metadata/").replace(
+                ".pdf", ".json"
+            )
+            metadata_path = os.path.join(files_store, json_file_path)
+
+            try:
+                os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                with open(metadata_path, "w", encoding="utf-8") as f:
+                    json.dump(simple_meta, f, ensure_ascii=False, indent=2)
+                info.spider.logger.info(f"Saved metadata: {json_file_path}")
+            except OSError as e:
+                raise OSError(f"Failed to save metadata to {metadata_path}: {e}") from e
+            except Exception as e:
+                raise RuntimeError(f"Unexpected error saving metadata: {e}") from e
 
         return item
 
