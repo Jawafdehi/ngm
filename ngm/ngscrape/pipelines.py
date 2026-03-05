@@ -27,7 +27,9 @@ class KanunPatrikaPipeline(FilesPipeline):
         Process completed file downloads and log results.
 
         Args:
-            results: List of (success, result_dict) tuples from file downloads
+            results: List where each entry is either (True, result_dict) for
+                successful downloads or (False, Failure) for failed downloads.
+                Failure objects have getErrorMessage() method for error details.
             item: The scraped item containing metadata
             info: Spider information object
 
@@ -106,9 +108,9 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
             try:
                 self.store.persist_file(json_file_path, BytesIO(json_bytes), info)
                 info.spider.logger.info(f"Saved metadata: {json_file_path}")
-            except Exception as e:
-                info.spider.logger.error(
-                    f"Failed to save metadata {json_file_path}: {e}"
+            except Exception:
+                info.spider.logger.exception(
+                    f"Failed to save metadata {json_file_path}"
                 )
 
         return item
