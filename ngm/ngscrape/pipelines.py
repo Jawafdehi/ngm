@@ -59,13 +59,21 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
         if metadata:
             serial_number = metadata.get("serial_number", "")
             title = metadata.get("title", "").replace("/", "-")
+
+            # Sanitize serial_number to prevent path traversal
+            safe_serial = "".join(
+                c for c in str(serial_number) if c.isalnum() or c in (" ", "-", "_")
+            ).strip()
+
             # Clean title for filename
             safe_title = "".join(
                 c for c in title if c.isalnum() or c in (" ", "-", "_")
             ).strip()
+
             if safe_title:
+                serial_prefix = f"{safe_serial}. " if safe_serial else ""
                 return posixpath.join(
-                    "pdf", f"{serial_number}. {safe_title} - {file_id}.pdf"
+                    "pdf", f"{serial_prefix}{safe_title} - {file_id}.pdf"
                 )
 
         return posixpath.join("pdf", f"{file_id}.pdf")
@@ -98,9 +106,14 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
                 "file_name": posixpath.basename(file_path),
             }
 
-            json_file_path = file_path.replace("pdf/", "metadata/", 1).replace(
-                ".pdf", ".json", 1
+            # Safely construct JSON path by replacing directory and extension
+            metadata_rel_path = (
+                f"metadata/{file_path[len('pdf/'):]}"
+                if file_path.startswith("pdf/")
+                else file_path
             )
+            json_file_path = posixpath.splitext(metadata_rel_path)[0] + ".json"
+
             json_bytes = json.dumps(simple_meta, ensure_ascii=False, indent=2).encode(
                 "utf-8"
             )
