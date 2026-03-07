@@ -1,7 +1,9 @@
 import json
 import os
+import posixpath
 import uuid
 from datetime import datetime
+from io import BytesIO
 from urllib.parse import urlparse
 import pytz
 from scrapy.pipelines.files import FilesPipeline
@@ -35,6 +37,19 @@ class KanunPatrikaPipeline(FilesPipeline):
         return f"{file_id}.pdf"
 
     def item_completed(self, results, item, info):
+        """
+        Process completed file downloads and log results.
+
+        Args:
+            results: List where each entry is either (True, result_dict) for
+                successful downloads or (False, Failure) for failed downloads.
+                Failure objects have getErrorMessage() method for error details.
+            item: The scraped item containing metadata
+            info: Spider information object
+
+        Returns:
+            The processed item
+        """
         for ok, result in results:
             if ok:
                 file_path = result["path"]
@@ -50,46 +65,80 @@ class CiaaAnnualReportsPipeline(FilesPipeline):
     def file_path(self, request, response=None, info=None, *, item=None):
         """Generate custom file path based on metadata."""
         metadata = item.get("metadata", {})
-        file_id = request.url.split("/")[-1].replace(".pdf", "")
+
+        # Extract file_id from URL, handling query strings
+        url_path = urlparse(request.url).path
+        file_id = posixpath.splitext(posixpath.basename(url_path))[0]
 
         if metadata:
             serial_number = metadata.get("serial_number", "")
             title = metadata.get("title", "").replace("/", "-")
+
+            # Sanitize serial_number to prevent path traversal
+            safe_serial = "".join(
+                c for c in str(serial_number) if c.isalnum() or c in (" ", "-", "_")
+            ).strip()
+
             # Clean title for filename
             safe_title = "".join(
                 c for c in title if c.isalnum() or c in (" ", "-", "_")
             ).strip()
-            if safe_title:
-                return f"{serial_number}. {safe_title} - {file_id}.pdf"
 
-        return f"{file_id}.pdf"
+            if safe_title:
+                serial_prefix = f"{safe_serial}. " if safe_serial else ""
+                return posixpath.join(
+                    "pdf", f"{serial_prefix}{safe_title} - {file_id}.pdf"
+                )
+
+        return posixpath.join("pdf", f"{file_id}.pdf")
 
     def item_completed(self, results, item, info):
         """Save simplified metadata and log download results."""
         metadata = item.get("metadata", {})
-        files_store = info.spider.settings.get("FILES_STORE")
+
         file_path = None
 
         for ok, result in results:
             if ok:
                 file_path = result["path"]
+                info.spider.logger.info(f"Downloaded: {file_path}")
+            else:
+                error_msg = (
+                    result.getErrorMessage()
+                    if hasattr(result, "getErrorMessage")
+                    else str(result)
+                )
+                info.spider.logger.error(
+                    f"Failed to download {item['file_urls'][0]}: {error_msg}"
+                )
 
         if metadata and file_path:
             simple_meta = {
                 "serial_number": metadata.get("serial_number", ""),
                 "date": metadata.get("date", ""),
                 "title": metadata.get("title", ""),
-                "file_name": os.path.basename(file_path),
+                "file_name": posixpath.basename(file_path),
             }
 
-            metadata_path = os.path.join(
-                files_store, file_path.replace(".pdf", ".json")
+            # Safely construct JSON path by replacing directory and extension
+            metadata_rel_path = (
+                f"metadata/{file_path[len('pdf/'):]}"
+                if file_path.startswith("pdf/")
+                else file_path
             )
-            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(simple_meta, f, ensure_ascii=False, indent=2)
+            json_file_path = posixpath.splitext(metadata_rel_path)[0] + ".json"
 
-            info.spider.logger.info(f"Saved metadata: {metadata_path}")
+            json_bytes = json.dumps(simple_meta, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            )
+
+            try:
+                self.store.persist_file(json_file_path, BytesIO(json_bytes), info)
+                info.spider.logger.info(f"Saved metadata: {json_file_path}")
+            except Exception:
+                info.spider.logger.exception(
+                    f"Failed to save metadata {json_file_path}"
+                )
 
         return item
 
