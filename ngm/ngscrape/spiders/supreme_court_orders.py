@@ -84,15 +84,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.successful_cases = 0
         self.failed_cases = 0
 
-    def _cookiejar_key(self, case_number: str) -> str:
+    def _cookiejar_key(self, court_identifier: str, case_number: str) -> str:
         """
-        Unique cookie-jar key per case.
+        Unique cookie-jar key per (court, case).
 
         Scrapy reuses one jar per domain by default — the server sees the returning
         court_session cookie and skips re-sending Set-Cookie, so CAPTCHA extraction
         finds nothing. A fresh jar per case forces a new PHP session each time.
+
+        court_identifier is included so the key remains collision-free even if
+        the same case_number appears in both "special" and "supreme" courts.
         """
-        return f"case_{case_number}"
+        return f"{court_identifier}_case_{case_number}"
 
     def _extract_captcha(self, response):
         """
@@ -317,7 +320,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             headers={"User-Agent": ua},
             meta={
                 **case_data,
-                "cookiejar": self._cookiejar_key(case_number),
+                "cookiejar": self._cookiejar_key(
+                    case_data["court_identifier"], case_number
+                ),
                 "handle_httpstatus_list": [301, 302],
                 "user_agent": ua,
             },
@@ -330,6 +335,15 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         redirect_hops = response.meta.get("redirect_hops", 0)
         case_number = response.meta.get("case_number")
 
+        try:
+            yield from self._do_parse(response, retry_count, redirect_hops, case_number)
+        except Exception:
+            self.failed_cases += 1
+            self.logger.exception(f"[{case_number}] Unexpected error in parse")
+            yield from self._next_request()
+
+    def _do_parse(self, response, retry_count, redirect_hops, case_number):
+        """Inner parse logic — wrapped by parse() to keep _pending_cases draining on error."""
         if response.status in (301, 302):
             if redirect_hops >= 10:
                 self.logger.error(f"[{case_number}] Too many redirect hops. Skipping.")
@@ -445,6 +459,28 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         redirect_hops = response.meta.get("redirect_hops", 0)
         captcha_retry_count = response.meta.get("captcha_retry_count", 0)
 
+        try:
+            yield from self._do_parse_results(
+                response,
+                case_number,
+                court_identifier,
+                redirect_hops,
+                captcha_retry_count,
+            )
+        except Exception:
+            self.failed_cases += 1
+            self.logger.exception(f"[{case_number}] Unexpected error in parse_results")
+            yield from self._next_request()
+
+    def _do_parse_results(
+        self,
+        response,
+        case_number,
+        court_identifier,
+        redirect_hops,
+        captcha_retry_count,
+    ):
+        """Inner parse_results logic — wrapped by parse_results() to keep queue draining on error."""
         if response.status in (301, 302):
             if redirect_hops >= 10:
                 self.logger.error(f"[{case_number}] Too many redirects. Skipping.")
@@ -504,7 +540,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                             "captcha_retry_count": captcha_retry_count + 1,
                             "handle_httpstatus_list": [301, 302],
                             "user_agent": response.meta.get("user_agent"),
-                            "cookiejar": f"{self._cookiejar_key(case_number)}_retry{captcha_retry_count + 1}",
+                            "cookiejar": f"{self._cookiejar_key(court_identifier, case_number)}_retry{captcha_retry_count + 1}",
                         },
                         dont_filter=True,
                     )
@@ -615,6 +651,5 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.logger.info(
             f"Spider closed: {reason} | "
             f"Total: {self.total_cases} | "
-            f"Success: {self.successful_cases} | "
-            f"Failed: {self.failed_cases}"
+            f"Success: {self.successful_cases} | Failed: {self.failed_cases}"
         )
