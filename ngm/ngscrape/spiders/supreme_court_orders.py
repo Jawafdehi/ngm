@@ -1,12 +1,10 @@
 """
 Supreme Court Orders Spider
 
-- Find document URL via CAPTCHA-protected search form
-- Yield {"file_urls": [...], "case_number": ..., "court_identifier": ...}
-- FilesPipeline handles download + S3 upload
-- Pipeline updates DB: extra_data["court_orders"] = ["court-orders/special/082-OA-0503.1.docx", ...]
+Scrapes order documents for Special and Supreme Court cases via a CAPTCHA-protected
+search form. Yields items to SupremeCourtOrdersPipeline for download and DB update.
 
-Courts: Special (priority 1) -> Supreme (priority 2) only
+Courts: Special (priority 1) → Supreme (priority 2)
 """
 
 import re
@@ -15,7 +13,7 @@ import pytz
 import random
 from collections import deque
 from datetime import datetime, timedelta, date
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, unquote
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
 from sqlalchemy import or_, case as sql_case, and_, func, tuple_
@@ -27,6 +25,7 @@ from ngm.ngscrape.pipelines import MIN_DAYS_FOR_DOCUMENTS, TOO_RECENT_RECHECK_DA
 import scrapy
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
+HOMEPAGE_URL = "https://supremecourt.gov.np/cp/"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
@@ -41,15 +40,13 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     allowed_domains = ("supremecourt.gov.np",)
 
     custom_settings = {  # noqa: RUF012
-        "ITEM_PIPELINES": {
-            "ngm.ngscrape.pipelines.SupremeCourtOrdersPipeline": 1,
-        },
+        "ITEM_PIPELINES": {"ngm.ngscrape.pipelines.SupremeCourtOrdersPipeline": 1},
         "CONCURRENT_REQUESTS": 1,
         "DOWNLOAD_DELAY": 3,
         "DOWNLOAD_TIMEOUT": 60,
         "COOKIES_ENABLED": True,
         "REDIRECT_ENABLED": False,
-        "USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",  # fallback only; requests use random UA from USER_AGENTS
+        "USER_AGENT": USER_AGENTS[0],
         "DEFAULT_REQUEST_HEADERS": {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
@@ -78,96 +75,92 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 "LOCAL_DATABASE_URL or DATABASE_URL environment variable must be set"
             )
 
-        # Determine which env var was used
-        db_source = (
-            "LOCAL_DATABASE_URL" if os.getenv("LOCAL_DATABASE_URL") else "DATABASE_URL"
-        )
-
-        # Redact credentials from URL for logging
-        parsed = urlparse(db_url)
-        if parsed.username or parsed.password:
-            # Replace userinfo with <redacted>
-            redacted_netloc = f"<redacted>@{parsed.hostname}"
-            if parsed.port:
-                redacted_netloc += f":{parsed.port}"
-        else:
-            redacted_netloc = parsed.netloc
-
-        redacted_url = f"{parsed.scheme}://{redacted_netloc}{parsed.path}"
-        self.logger.info(f"Using {db_source}: {redacted_url}")
-
         self.engine = get_engine(db_url)
         self.session = get_session(self.engine)
-
         self.total_cases = 0
         self.successful_cases = 0
         self.failed_cases = 0
 
-    def _is_case_old_enough(self, last_hearing_date, case_number):
+    def _cookiejar_key(self, case_number: str) -> str:
         """
-        Check if case is old enough for documents to be available.
-        Returns True if last hearing >= MIN_DAYS_FOR_DOCUMENTS days ago.
-        Returns False if hearing data is missing (soft-skip instead of permanent failure).
+        Unique cookie-jar key per case.
 
-        Args:
-            last_hearing_date: Date of last hearing (datetime.date, str, or None)
-            case_number: Case number (for logging)
+        Scrapy reuses one jar per domain by default — the server sees the returning
+        court_session cookie and skips re-sending Set-Cookie, so CAPTCHA extraction
+        finds nothing. A fresh jar per case forces a new PHP session each time.
         """
+        return f"case_{case_number}"
+
+    def _extract_captcha(self, response):
+        """
+        Extract the CAPTCHA answer from the PHP session cookie in Set-Cookie headers.
+
+        The server embeds the answer in the court_session cookie as a PHP-serialised
+        string: a:2:{s:12:"captcha_word";s:5:"hello";...}
+
+        Returns:
+            (captcha_word, raw_encoded_cookie_value) or (None, None)
+        """
+        if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
+            return None, None
+
+        for raw_header in response.headers.getlist(b"Set-Cookie"):
+            header_str = raw_header.decode("utf-8", errors="ignore")
+            if "court_session=" not in header_str:
+                continue
+
+            value_match = re.search(r"court_session=([^;]+)", header_str)
+            if not value_match:
+                continue
+
+            raw_cookie_value = value_match.group(1)
+            decoded_value = unquote(raw_cookie_value)
+
+            captcha_match = re.search(r'"captcha_word";s:\d+:"([^"]+)"', decoded_value)
+            if captcha_match:
+                return captcha_match.group(1), raw_cookie_value
+
+        return None, None
+
+    def _is_case_old_enough(self, last_hearing_date, case_number):
+        """Return True if last hearing was >= MIN_DAYS_FOR_DOCUMENTS days ago."""
         if not last_hearing_date:
             self.logger.warning(
-                f"[{case_number}] No hearing data available, treating as too recent (soft-skip)"
+                f"[{case_number}] No hearing data — treating as too recent (soft-skip)"
             )
-            return False  # Soft-skip instead of permanent failure
+            return False
 
-        # Handle potential string serialization from Scrapy meta
         if isinstance(last_hearing_date, str):
             last_hearing_date = date.fromisoformat(last_hearing_date)
 
         days_since = (datetime.now(KATHMANDU_TZ).date() - last_hearing_date).days
         is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENTS
-
         self.logger.info(
             f"[{case_number}] Last hearing {days_since} days ago -> old_enough={is_old_enough}"
         )
-
         return is_old_enough
 
     def _get_cases_to_scrape(self):
-        """
-        Query all decided cases that haven't been scraped yet.
-        Only processes Special Court and Supreme Court cases.
-
-        Priority order: Special (1) first, then Supreme (2).
-        Within each priority group: most recent registration date first.
-        """
+        """Query decided Special/Supreme Court cases not yet scraped."""
         query = self.session.query(CourtCase)
 
-        # Only special and supreme courts
         query = query.filter(
             or_(
                 CourtCase.court_identifier == "special",
                 CourtCase.court_identifier == "supreme",
             )
         )
-
-        # Has a final decision
         query = query.filter(CourtCase.case_status.like("%फैसला%"))
-
-        # Not ongoing
         query = query.filter(
             ~CourtCase.case_status.like("%चालु%"),
             ~CourtCase.case_status.like("%चलिरहेको%"),
         )
-
-        # Not already scraped
         query = query.filter(
             or_(
                 CourtCase.extra_data.is_(None),
                 CourtCase.extra_data["court_orders"].astext.is_(None),
             )
         )
-
-        # Skip known failures
         query = query.filter(
             or_(
                 CourtCase.extra_data.is_(None),
@@ -176,7 +169,6 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
         )
 
-        # Skip cases marked too_recent if checked within TOO_RECENT_RECHECK_DAYS
         recheck_cutoff = (
             datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
             - timedelta(days=TOO_RECENT_RECHECK_DAYS)
@@ -184,10 +176,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         query = query.filter(
             or_(
-                # Case has no too_recent marker
                 CourtCase.extra_data.is_(None),
                 CourtCase.extra_data["orders_too_recent"].astext.is_(None),
-                # Case is marked too_recent but ready for recheck
                 and_(
                     CourtCase.extra_data["orders_too_recent"].astext == "true",
                     or_(
@@ -201,31 +191,26 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
         )
 
-        # Priority: Special(1) → Supreme(2)
         court_priority = sql_case(
             (CourtCase.court_identifier == "special", 1),
             (CourtCase.court_identifier == "supreme", 2),
             else_=99,
         )
 
-        # Wrap query in explicit transaction
         with self.session.begin():
             cases = (
                 query.order_by(
-                    court_priority,
-                    CourtCase.registration_date_ad.desc().nullslast(),
+                    court_priority, CourtCase.registration_date_ad.desc().nullslast()
                 )
                 .limit(self.limit)
                 .all()
             )
 
-            # Materialize data inside transaction to avoid lazy loading errors
-            # Fetch all last hearing dates in one query to avoid N+1
-            case_numbers = [(c.case_number, c.court_identifier) for c in cases]
+            case_keys = [(c.case_number, c.court_identifier) for c in cases]
 
-            if case_numbers:
-                # Subquery to get most recent hearing per case
-                subq = (
+            hearing_dates = {}
+            if case_keys:
+                rows = (
                     self.session.query(
                         CourtCaseHearing.case_number,
                         CourtCaseHearing.court_identifier,
@@ -237,37 +222,29 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                         tuple_(
                             CourtCaseHearing.case_number,
                             CourtCaseHearing.court_identifier,
-                        ).in_(case_numbers)
+                        ).in_(case_keys)
                     )
                     .group_by(
-                        CourtCaseHearing.case_number,
-                        CourtCaseHearing.court_identifier,
+                        CourtCaseHearing.case_number, CourtCaseHearing.court_identifier
                     )
                     .all()
                 )
-
-                # Build lookup dict
                 hearing_dates = {
-                    (row.case_number, row.court_identifier): row.last_hearing_date
-                    for row in subq
+                    (r.case_number, r.court_identifier): r.last_hearing_date
+                    for r in rows
                 }
-            else:
-                hearing_dates = {}
 
-            result = []
-            for case in cases:
-                last_hearing_date = hearing_dates.get(
-                    (case.case_number, case.court_identifier)
-                )
-
-                result.append(
-                    {
-                        "case_number": case.case_number,
-                        "court_identifier": case.court_identifier,
-                        "registration_date_bs": case.registration_date_bs,
-                        "last_hearing_date": last_hearing_date,
-                    }
-                )
+            result = [
+                {
+                    "case_number": c.case_number,
+                    "court_identifier": c.court_identifier,
+                    "registration_date_bs": c.registration_date_bs,
+                    "last_hearing_date": hearing_dates.get(
+                        (c.case_number, c.court_identifier)
+                    ),
+                }
+                for c in cases
+            ]
 
         self.logger.info(f"Found {len(result)} cases to scrape")
         return result
@@ -281,7 +258,11 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 "Set ENABLE_CAPTCHA_COOKIE_EXTRACT=True to run this spider."
             )
 
-        cases = self._get_cases_to_scrape()
+        try:
+            cases = self._get_cases_to_scrape()
+        except Exception:
+            self.logger.exception("Failed to query cases — aborting spider")
+            return
 
         if not cases:
             self.logger.warning("No cases found to scrape")
@@ -293,10 +274,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 court_type, court_id = get_court_params(case["court_identifier"])
             except ValueError as e:
                 self.logger.error(
-                    f"[{case['case_number']}] Skipping — unknown court identifier "
-                    f"{case['court_identifier']!r}: {e}"
+                    f"[{case['case_number']}] Skipping — unknown court {case['court_identifier']!r}: {e}"
                 )
-                # Don't increment failed_cases - this case was never processed
                 continue
 
             self._pending_cases.append(
@@ -310,32 +289,32 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 }
             )
 
-        # Set total_cases after filtering to reflect actual cases to process
         self.total_cases = len(self._pending_cases)
         self.logger.info(f"Starting to process {self.total_cases} cases")
         yield from self._next_request()
 
     def _next_request(self):
-        """Yield homepage request for next pending case."""
+        """Yield a homepage GET for the next pending case."""
         if not self._pending_cases:
             return
 
         case_data = self._pending_cases.popleft()
+        case_number = case_data["case_number"]
         processed = self.total_cases - len(self._pending_cases)
 
         self.logger.info(
-            f"[{processed}/{self.total_cases}] Processing case {case_data['case_number']} "
+            f"[{processed}/{self.total_cases}] Processing case {case_number} "
             f"(court={case_data['court_identifier']})"
         )
 
-        # Pick UA once per case and apply to all requests (homepage, redirects, form)
         ua = random.choice(USER_AGENTS)  # noqa: S311
         yield scrapy.Request(
-            url="https://supremecourt.gov.np/cp/",
+            url=HOMEPAGE_URL,
             callback=self.parse,
             headers={"User-Agent": ua},
             meta={
                 **case_data,
+                "cookiejar": self._cookiejar_key(case_number),
                 "handle_httpstatus_list": [301, 302],
                 "user_agent": ua,
             },
@@ -343,40 +322,31 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         )
 
     def parse(self, response):
-        """
-        Handle homepage response.
-
-        Redirects are handled manually (REDIRECT_ENABLED=False) because the CAPTCHA
-        answer arrives in Set-Cookie on the redirect response. Automatic redirect
-        handling would swallow it.
-        """
+        """Handle homepage response and extract CAPTCHA."""
         retry_count = response.meta.get("retry_count", 0)
         redirect_hops = response.meta.get("redirect_hops", 0)
         case_number = response.meta.get("case_number")
 
         if response.status in (301, 302):
             if redirect_hops >= 10:
-                self.logger.error(
-                    f"[{case_number}] Too many redirect hops ({redirect_hops}). Skipping case."
-                )
+                self.logger.error(f"[{case_number}] Too many redirect hops. Skipping.")
                 yield from self._next_request()
                 return
 
             location = response.headers.get("Location")
             if not location:
                 self.logger.error(
-                    f"[{case_number}] Redirect response missing Location header. Skipping case."
+                    f"[{case_number}] Redirect missing Location header. Skipping."
                 )
                 yield from self._next_request()
                 return
 
             meta = response.meta.copy()
             meta["redirect_hops"] = redirect_hops + 1
-
             captcha, raw_cookie = self._extract_captcha(response)
             if captcha:
                 meta["captcha_solution"] = captcha
-                meta["court_session_cookie"] = raw_cookie  # carry raw cookie in meta
+                meta["court_session_cookie"] = raw_cookie
 
             yield scrapy.Request(
                 url=urljoin(response.url, location.decode("utf-8")),
@@ -395,26 +365,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if captcha:
             self.logger.info(
-                f"[{case_number}] Extracted CAPTCHA (length={len(captcha)}) from homepage response"
+                f"[{case_number}] Extracted CAPTCHA (length={len(captcha)})"
             )
             yield self._submit_form(response, captcha, raw_cookie)
             return
 
         if retry_count < self.MAX_HOMEPAGE_RETRIES:
             self.logger.warning(
-                f"[{case_number}] No CAPTCHA found on {response.url} "
-                f"(status={response.status}, "
-                f"redirect_hops={response.meta.get('redirect_hops', 0)}, "
-                f"set_cookie_count={len(response.headers.getlist(b'Set-Cookie'))}). "
-                f"Retry {retry_count + 1}/{self.MAX_HOMEPAGE_RETRIES}"
+                f"[{case_number}] No CAPTCHA found (retry {retry_count + 1}/{self.MAX_HOMEPAGE_RETRIES})"
             )
-
             meta = response.meta.copy()
             meta["retry_count"] = retry_count + 1
             meta.pop("captcha_solution", None)
-            meta.pop("court_session_cookie", None)  # Don't reuse stale cookie
+            meta.pop("court_session_cookie", None)
             yield scrapy.Request(
-                url="https://supremecourt.gov.np/cp/",
+                url=HOMEPAGE_URL,
                 callback=self.parse,
                 headers={
                     "User-Agent": meta.get("user_agent", self.settings["USER_AGENT"])
@@ -424,44 +389,20 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
             return
 
-        # Failed to extract CAPTCHA after max retries - skip this case
         self.logger.error(
             f"[{case_number}] Failed to extract CAPTCHA after {self.MAX_HOMEPAGE_RETRIES} retries. "
-            "Skipping case - will retry next run."
+            "Skipping — will retry next run."
         )
         yield from self._next_request()
-        return
-
-    def _extract_captcha(self, response):
-        """Extract CAPTCHA answer and raw cookie from PHP session cookie."""
-        if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
-            return None, None
-
-        for header in response.headers.getlist(b"Set-Cookie"):
-            val = header.decode("utf-8", errors="ignore")
-            if "court_session=" not in val:
-                continue
-            match = re.search(r'"captcha_word";s:\d+:"([^"]+)"', unquote(val))
-            if match:
-                captcha = match.group(1)
-                # Extract raw cookie value to inject manually
-                raw_match = re.search(r"court_session=([^;]+)", val)
-                raw_cookie = raw_match.group(1) if raw_match else None
-                self.logger.debug(
-                    f"Extracted CAPTCHA (length={len(captcha)}) from {response.url}"
-                )
-                return captcha, raw_cookie
-
-        return None, None
 
     def _submit_form(self, response, captcha_solution, court_session_cookie=None):
-        """Submit the search form with case details and extracted CAPTCHA."""
+        """POST the search form with CAPTCHA and injected session cookie."""
         case_number = response.meta.get("case_number")
 
         formdata = {
             "court_type": response.meta["court_type"],
             "court_id": response.meta["court_id"],
-            "regno": response.meta["case_number"],
+            "regno": case_number,
             "darta_date": response.meta["registration_date_bs"],
             "faisala_date": "",
             "captcha": captcha_solution,
@@ -470,27 +411,21 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         self.logger.info(
             f"[{case_number}] Submitting form: court_type={formdata['court_type']}, "
-            f"court_id={formdata['court_id']}, regno={formdata['regno']}, "
-            "captcha='REDACTED', "
-            f"court_session={'SET' if court_session_cookie else 'MISSING'}"
+            f"court_id={formdata['court_id']}, "
+            f"manual_cookie={'SET' if court_session_cookie else 'MISSING'}"
         )
 
-        # Store CAPTCHA metadata (not raw value) for debugging
-        meta = response.meta.copy()
-        meta["submitted_captcha_length"] = len(captcha_solution)
-
-        # Inject court_session directly — bypasses Scrapy's cookie jar entirely
-        # Scrapy drops duplicate cookies, so we manage this cookie manually
         headers = {
             "Referer": response.url,
             "Origin": "https://supremecourt.gov.np",
-            "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": response.meta.get("user_agent", self.settings["USER_AGENT"]),
         }
         if court_session_cookie:
             headers["Cookie"] = f"court_session={court_session_cookie}"
 
-        # Use FormRequest directly instead of from_response to ensure empty values are sent
+        meta = response.meta.copy()
+        meta["submitted_captcha_length"] = len(captcha_solution)
+
         return FormRequest(
             url=response.url,
             formdata=formdata,
@@ -501,7 +436,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         )
 
     def parse_results(self, response):
-        """Parse search results page."""
+        """Parse search results and extract document URLs."""
         case_number = response.meta.get("case_number")
         court_identifier = response.meta.get("court_identifier")
         redirect_hops = response.meta.get("redirect_hops", 0)
@@ -509,18 +444,18 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if response.status in (301, 302):
             if redirect_hops >= 10:
-                self.logger.error(
-                    f"[{case_number}] Too many redirects in results ({redirect_hops}). Skipping case."
-                )
+                self.logger.error(f"[{case_number}] Too many redirects. Skipping.")
                 yield from self._next_request()
                 return
+
             location = response.headers.get("Location")
             if not location:
                 self.logger.error(
-                    f"[{case_number}] Results redirect missing Location header. Skipping case."
+                    f"[{case_number}] Results redirect missing Location. Skipping."
                 )
                 yield from self._next_request()
                 return
+
             meta = response.meta.copy()
             meta["redirect_hops"] = redirect_hops + 1
             yield scrapy.Request(
@@ -539,79 +474,59 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         error_table = soup.find("table", bgcolor="#FF6600")
         if error_table:
             error_text = error_table.get_text(strip=True)
-
             if "Invalid CAPTCHA" in error_text:
-                # DEBUG: Check if we had submitted a CAPTCHA and if server issued a new one
-                had_captcha = "submitted_captcha_length" in response.meta
-                current_cookie_captcha, _ = self._extract_captcha(response)
-
-                self.logger.error(
-                    f"[{case_number}] Invalid CAPTCHA "
-                    f"(submitted={'yes' if had_captcha else 'no'}, "
-                    f"server_issued_new={'yes' if current_cookie_captcha else 'no'})"
-                )
-
+                self.logger.error(f"[{case_number}] Invalid CAPTCHA")
                 if captcha_retry_count < self.MAX_CAPTCHA_RETRIES:
                     self.logger.warning(
-                        f"[{case_number}] Invalid CAPTCHA, retrying with fresh session "
+                        f"[{case_number}] Retrying with fresh session "
                         f"({captcha_retry_count + 1}/{self.MAX_CAPTCHA_RETRIES})"
                     )
-
-                    # Don't carry old court_session_cookie — fresh one will be extracted on next homepage GET
-                    meta = {
-                        "case_number": case_number,
-                        "court_identifier": court_identifier,
-                        "court_type": response.meta["court_type"],
-                        "court_id": response.meta["court_id"],
-                        "registration_date_bs": response.meta["registration_date_bs"],
-                        "last_hearing_date": response.meta.get("last_hearing_date"),
-                        "captcha_retry_count": captcha_retry_count + 1,
-                        "handle_httpstatus_list": [301, 302],
-                        "user_agent": response.meta.get(
-                            "user_agent"
-                        ),  # Carry UA to retry
-                    }
                     yield scrapy.Request(
-                        url="https://supremecourt.gov.np/cp/",
+                        url=HOMEPAGE_URL,
                         callback=self.parse,
                         headers={
-                            "User-Agent": meta.get(
+                            "User-Agent": response.meta.get(
                                 "user_agent", self.settings["USER_AGENT"]
                             )
                         },
-                        meta=meta,
+                        meta={
+                            "case_number": case_number,
+                            "court_identifier": court_identifier,
+                            "court_type": response.meta["court_type"],
+                            "court_id": response.meta["court_id"],
+                            "registration_date_bs": response.meta[
+                                "registration_date_bs"
+                            ],
+                            "last_hearing_date": response.meta.get("last_hearing_date"),
+                            "captcha_retry_count": captcha_retry_count + 1,
+                            "handle_httpstatus_list": [301, 302],
+                            "user_agent": response.meta.get("user_agent"),
+                            "cookiejar": f"{self._cookiejar_key(case_number)}_retry{captcha_retry_count + 1}",
+                        },
                         dont_filter=True,
                     )
                     return
-                else:
-                    self.logger.error(
-                        f"[{case_number}] Invalid CAPTCHA after {self.MAX_CAPTCHA_RETRIES} retries. "
-                        "Will retry next run."
-                    )
-                    yield from self._next_request()
-                    return
+                self.logger.error(
+                    f"[{case_number}] Invalid CAPTCHA after {self.MAX_CAPTCHA_RETRIES} retries. "
+                    "Will retry next run."
+                )
             else:
                 self.logger.warning(
                     f"[{case_number}] Server error: {error_text}. Will retry next run."
                 )
-                yield from self._next_request()
-                return
+            yield from self._next_request()
+            return
 
-        # Validate we got a real results page
         if "फैसला / आदेश को पुर्ण पाठ" not in response.text:
             self.logger.warning(
-                f"[{case_number}] Results page missing expected heading "
-                f"'फैसला / आदेश को पुर्ण पाठ' — likely not a valid results page "
-                f"(status={response.status}, url={response.url}). Will retry next run."
+                f"[{case_number}] Not a valid results page. Will retry next run."
             )
             yield from self._next_request()
             return
 
-        # Check if no records found - skip and retry next run
         if "रेकर्ड भेटिएन" in response.text:
             self.logger.warning(
-                f"[{case_number}] No records found on website ('रेकर्ड भेटिएन'). "
-                "Will retry next run."
+                f"[{case_number}] No records found. Will retry next run."
             )
             yield from self._next_request()
             return
@@ -620,22 +535,17 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             "table", class_="table table-bordered sc-table"
         ) or soup.find("table", class_="table")
         if not results_table:
-            # Valid results page (heading found) but table structure missing
             self.logger.warning(
-                f"[{case_number}] Valid results page but table structure missing. "
-                "Might be temporary server issue. Will retry next run."
+                f"[{case_number}] Results table missing. Will retry next run."
             )
-            # Don't yield error item - just skip and retry next run
             yield from self._next_request()
             return
 
         tbody = results_table.find("tbody")
         if not tbody:
             self.logger.warning(
-                f"[{case_number}] Results table has no tbody. "
-                "Might be temporary server issue. Will retry next run."
+                f"[{case_number}] Results table has no tbody. Will retry next run."
             )
-            # Don't mark as failed - could be temporary
             yield from self._next_request()
             return
 
@@ -643,75 +553,61 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         seen = set()
         for row in tbody.find_all("tr"):
             cells = row.find_all("td")
-
             if len(cells) < 10:
                 continue
-
             link = cells[9].find("a", class_="download_content")
             if link and link.get("href"):
                 doc_url = urljoin(response.url, link["href"])
-                # Deduplicate URLs (order-preserving)
                 if doc_url not in seen:
                     seen.add(doc_url)
                     doc_urls.append(doc_url)
                     self.logger.info(f"[{case_number}] Found document URL: {doc_url}")
 
         if not doc_urls:
-            # Get last hearing date from meta (fetched in _get_cases_to_scrape)
-            last_hearing_date = response.meta.get("last_hearing_date")
-            is_old_enough = self._is_case_old_enough(last_hearing_date, case_number)
-
-            self.logger.warning(
-                f"[{case_number}] No download links found in results table."
+            is_old_enough = self._is_case_old_enough(
+                response.meta.get("last_hearing_date"), case_number
             )
-
+            error = "no_docs_old_case" if is_old_enough else "too_recent"
             if is_old_enough:
                 self.logger.warning(
-                    f"[{case_number}] Old Case, (>={MIN_DAYS_FOR_DOCUMENTS} days since last hearing). "
-                    "Marking as PERMANENT FAILURE."
+                    f"[{case_number}] Old case — marking as permanent failure."
                 )
-                yield {
-                    "file_urls": [],
-                    "case_number": case_number,
-                    "court_identifier": court_identifier,
-                    "error": "no_docs_old_case",
-                }
             else:
                 self.logger.info(
-                    f"[{case_number}] Recent Case, (<{MIN_DAYS_FOR_DOCUMENTS} days since last hearing). "
-                    f"Recheck in {TOO_RECENT_RECHECK_DAYS} days."
+                    f"[{case_number}] Recent case — will recheck in {TOO_RECENT_RECHECK_DAYS} days."
                 )
-                yield {
-                    "file_urls": [],
-                    "case_number": case_number,
-                    "court_identifier": court_identifier,
-                    "error": "too_recent",
-                }
-
+            yield {
+                "file_urls": [],
+                "case_number": case_number,
+                "court_identifier": court_identifier,
+                "error": error,
+            }
             yield from self._next_request()
             return
 
         self.logger.info(
             f"[{case_number}] Found {len(doc_urls)} document(s), yielding to pipeline"
         )
-
         yield {
             "file_urls": doc_urls,
             "case_number": case_number,
             "court_identifier": court_identifier,
         }
-
         yield from self._next_request()
 
     def closed(self, reason):
         """Clean up database connections when spider closes."""
-        try:
-            if hasattr(self, "session") and self.session:
+        if hasattr(self, "session") and self.session:
+            try:
                 self.session.close()
-            if hasattr(self, "engine") and self.engine:
+            except Exception:
+                self.logger.exception("Error closing database session")
+
+        if hasattr(self, "engine") and self.engine:
+            try:
                 self.engine.dispose()
-        except Exception:
-            self.logger.exception("Error during spider cleanup")
+            except Exception:
+                self.logger.exception("Error disposing database engine")
 
         self.logger.info(
             f"Spider closed: {reason} | "
