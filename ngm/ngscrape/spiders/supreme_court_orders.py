@@ -77,6 +77,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         self.engine = get_engine(db_url)
         self.session = get_session(self.engine)
+        self.logger.info(
+            f"Connected using {'LOCAL_DATABASE_URL' if os.getenv('LOCAL_DATABASE_URL') else 'DATABASE_URL'}"
+        )
         self.total_cases = 0
         self.successful_cases = 0
         self.failed_cases = 0
