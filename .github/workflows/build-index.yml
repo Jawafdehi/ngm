@@ -8,6 +8,7 @@ on:
 jobs:
   build_index:
     runs-on: ubuntu-latest
+    environment: "NGM Scrape"
 
     steps:
       - name: Checkout repository
