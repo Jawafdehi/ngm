@@ -105,7 +105,6 @@ class KanunPatrikaIndexer(Indexer):
 
 
 def main():
-    from cloudpathlib import S3Client
 
     files_store_env = os.getenv("FILES_STORE")
     if not files_store_env:
@@ -113,22 +112,6 @@ def main():
         exit(1)
 
     files_store = str(files_store_env)
-
-    # If the file store is S3, configure the S3Client to use AWS_REGION if available
-    if files_store.startswith("s3://"):
-        import boto3
-
-        session_kwargs = {}
-        region = os.getenv("AWS_REGION")
-        if region:
-            session_kwargs["region_name"] = region
-
-        endpoint_url = os.getenv("AWS_ENDPOINT_URL")
-        if endpoint_url:
-            session_kwargs["endpoint_url"] = endpoint_url
-
-        client = S3Client(boto3_session=boto3.Session(**session_kwargs))
-        client.set_as_default_client()
 
     base_url = get_base_url()
 

@@ -27,7 +27,6 @@ jobs:
 
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-        working-directory: ./services/ngm
 
       - name: Run index builder
         env:
@@ -38,4 +37,3 @@ jobs:
           AWS_REGION: 'auto'
           NGM_STORE_BASE_URL: https://ngm-store.newnepal.org
         run: poetry run python ngm/index/build_index.py
-        working-directory: ./services/ngm
