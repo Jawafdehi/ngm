@@ -13,7 +13,7 @@ from ngm.database.models import CourtCase
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
 # Days since last hearing before documents are expected on the site
-MIN_DAYS_FOR_DOCUMENTS = 400
+MIN_DAYS_FOR_DOCUMENT_AVAILABILITY = 365
 
 # How often to re-check soft-skipped cases
 TOO_RECENT_RECHECK_DAYS = 30

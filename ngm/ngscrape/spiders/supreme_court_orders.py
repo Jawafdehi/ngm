@@ -5,11 +5,24 @@ Scrapes order documents for Special and Supreme Court cases via a CAPTCHA-protec
 search form. Yields items to SupremeCourtOrdersPipeline for download and DB update.
 
 Courts: Special (priority 1) → Supreme (priority 2)
+
+Rate limiting
+─────────────
+The spider processes ~100 cases/hour by default in prod/GitHub Actions.
+Each GitHub Actions job runs up to 6 hours (~600 cases/job). The workflow
+re-triggers every 8 hours so there is continuous coverage.
+
+Override the rate locally:
+    scrapy crawl supreme_court_orders -s DOWNLOAD_DELAY=0 -a limit=500
+    
+Or override the limit:
+    scrapy crawl supreme_court_orders -a limit=100
 """
 
 import re
 import os
 import pytz
+import scrapy
 import random
 from collections import deque
 from datetime import datetime, timedelta, date
@@ -20,12 +33,24 @@ from sqlalchemy import or_, case as sql_case, and_, func, tuple_
 
 from ngm.database.models import get_engine, get_session, CourtCase, CourtCaseHearing
 from ngm.utils.court_mapping import get_court_params
-from ngm.ngscrape.pipelines import MIN_DAYS_FOR_DOCUMENTS, TOO_RECENT_RECHECK_DAYS
+from ngm.ngscrape.pipelines import (
+    MIN_DAYS_FOR_DOCUMENT_AVAILABILITY,
+    TOO_RECENT_RECHECK_DAYS,
+)
 
-import scrapy
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 HOMEPAGE_URL = "https://supremecourt.gov.np/cp/"
+
+# Default cases to process per run.
+# Each case requires ~2 HTTP requests (homepage GET + form POST).
+# To get 100 cases/hour: 100 cases × 2 requests = 200 requests/hour → 18s per request.
+# Each GH Actions job runs ~6 hours → 100 cases/hour × 6 hours = 600 cases/job.
+DEFAULT_CASES_PER_RUN = 600
+
+# Seconds between requests to achieve ~100 cases/hour.
+# 18s delay × 2 requests per case = 36s per case = 100 cases/hour.
+PROD_DOWNLOAD_DELAY = 18
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
@@ -42,7 +67,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     custom_settings = {  # noqa: RUF012
         "ITEM_PIPELINES": {"ngm.ngscrape.pipelines.SupremeCourtOrdersPipeline": 1},
         "CONCURRENT_REQUESTS": 1,
-        "DOWNLOAD_DELAY": 3,
+        "DOWNLOAD_DELAY": PROD_DOWNLOAD_DELAY,  # Can be overridden via -s DOWNLOAD_DELAY=0
         "DOWNLOAD_TIMEOUT": 60,
         "COOKIES_ENABLED": True,
         "REDIRECT_ENABLED": False,
@@ -58,8 +83,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
     MAX_CAPTCHA_RETRIES = 5
     MAX_HOMEPAGE_RETRIES = 3
 
-    def __init__(self, limit=500, *args, **kwargs):
+    def __init__(self, limit=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Resolve limit: spider arg → env var → default
+        if limit is None:
+            limit = os.getenv("SUPREME_ORDERS_LIMIT", DEFAULT_CASES_PER_RUN)
 
         try:
             self.limit = int(limit)
@@ -69,17 +98,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if self.limit <= 0:
             raise ValueError(f"limit must be positive, got: {self.limit}")
 
-        db_url = os.getenv("LOCAL_DATABASE_URL") or os.getenv("DATABASE_URL")
+        db_url = os.getenv("DATABASE_URL")
         if not db_url:
-            raise ValueError(
-                "LOCAL_DATABASE_URL or DATABASE_URL environment variable must be set"
-            )
+            raise ValueError("DATABASE_URL environment variable must be set")
 
         self.engine = get_engine(db_url)
         self.session = get_session(self.engine)
-        self.logger.info(
-            f"Connected using {'LOCAL_DATABASE_URL' if os.getenv('LOCAL_DATABASE_URL') else 'DATABASE_URL'}"
-        )
         self.total_cases = 0
         self.successful_cases = 0
         self.failed_cases = 0
@@ -129,7 +153,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         return None, None
 
     def _is_case_old_enough(self, last_hearing_date, case_number):
-        """Return True if last hearing was >= MIN_DAYS_FOR_DOCUMENTS days ago."""
+        """Return True if last hearing was >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY days ago."""
         if not last_hearing_date:
             self.logger.warning(
                 f"[{case_number}] No hearing data — treating as too recent (soft-skip)"
@@ -140,7 +164,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             last_hearing_date = date.fromisoformat(last_hearing_date)
 
         days_since = (datetime.now(KATHMANDU_TZ).date() - last_hearing_date).days
-        is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENTS
+        is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY
         self.logger.info(
             f"[{case_number}] Last hearing {days_since} days ago -> old_enough={is_old_enough}"
         )

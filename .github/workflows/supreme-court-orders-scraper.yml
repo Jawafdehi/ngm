@@ -2,8 +2,8 @@ name: Supreme Court Orders Scraper
 
 on:
   schedule:
-    # Run daily at 4:00 AM UTC (9:45 AM Nepal Time)
-    - cron: '0 4 * * *'
+    # Run every 8 hours: 00:00, 08:00, 16:00 UTC
+    - cron: '0 0,8,16 * * *'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -46,6 +46,10 @@ jobs:
 
       - name: Run Supreme Court Orders scraper
         working-directory: ./ngm
-        run: poetry run scrapy crawl supreme_court_orders
+        # Processes up to 600 cases per 6-hour job at 100 cases/hour.
+        # Rate: DOWNLOAD_DELAY=18s × 2 requests/case = 36s/case → 100 cases/hour
+        # 100 cases/hour × 6 hours = 600 cases per job
+        run: poetry run scrapy crawl supreme_court_orders -a limit=600
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENABLE_CAPTCHA_COOKIE_EXTRACT: "True"
