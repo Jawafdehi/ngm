@@ -20,11 +20,11 @@ Usage:
 
 """
 
-import os
 import re
 
 import scrapy
 from urllib.parse import urljoin
+from cloudpathlib import AnyPath
 
 from ngm.ngscrape.settings import FILES_STORE
 from ngm.utils.normalizer import nepali_to_roman_numerals, normalize_whitespace
@@ -32,6 +32,11 @@ from ngm.utils.normalizer import nepali_to_roman_numerals, normalize_whitespace
 
 # Base URL for CIAA press releases
 BASE_URL = "https://ciaa.gov.np/pressrelease/"
+
+# Checkpoint file path (works with both local and S3 storage)
+CHECKPOINT_PATH = (
+    AnyPath(FILES_STORE) / "uploads" / "ciaa" / "press-releases" / ".checkpoint"
+)
 
 
 class CiaaPressReleasesSpider(scrapy.Spider):
@@ -42,7 +47,9 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         "ITEM_PIPELINES": {
             "ngm.ngscrape.pipelines.CiaaPressReleasesPipeline": 1,
         },
-        "FILES_STORE": os.path.join(FILES_STORE, "ciaa/press-releases/"),
+        "FILES_STORE": str(
+            AnyPath(FILES_STORE) / "uploads" / "ciaa" / "press-releases"
+        ),
         "MEDIA_ALLOW_REDIRECTS": False,  # Don't follow redirects for missing press releases
     }
 
@@ -57,16 +64,13 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         """
         super().__init__(*args, **kwargs)
 
-        self.checkpoint_file = os.path.join(
-            FILES_STORE, "ciaa/press-releases/.checkpoint"
-        )
-        self.processed_ids = self._load_checkpoint()
+        last_id = self._load_checkpoint()
 
         # Initialize current_id (source of truth for scraping position)
         if start_id is not None:
             self.current_id = int(start_id)
-        elif self.processed_ids:
-            self.current_id = max(self.processed_ids) + 1
+        elif last_id > 0:
+            self.current_id = last_id + 1
             self.logger.info(f"Resuming from press release ID {self.current_id}")
         else:
             self.current_id = 1
@@ -77,31 +81,38 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         self._should_stop = False
 
     def _load_checkpoint(self):
-        """Load processed press release IDs from checkpoint file.
+        """Load last processed press release ID from checkpoint file.
 
-        TODO: For GitHub Actions, implement S3-based checkpointing since local files don't persist
+        Uses cloudpathlib.AnyPath for unified local/S3 access - works in both
+        local development and GitHub Actions with S3 storage.
+
+        Returns the last processed ID (not a set) since we scrape sequentially.
+        For cloud storage, the checkpoint persists across workflow runs.
         """
-        if os.path.exists(self.checkpoint_file):
+        if CHECKPOINT_PATH.exists():
             try:
-                with open(self.checkpoint_file, "r") as f:
-                    processed = {int(line.strip()) for line in f if line.strip()}
-                self.logger.info(
-                    f"Loaded checkpoint: {len(processed)} press releases already processed"
-                )
-                return processed
-            except Exception as e:
-                self.logger.warning(f"Failed to load checkpoint: {e}")
-        return set()
+                content = CHECKPOINT_PATH.read_text(encoding="utf-8").strip()
+                if content:
+                    last_id = int(content)
+                    self.logger.info(
+                        f"Loaded checkpoint: last processed press release ID {last_id}"
+                    )
+                    return last_id
+            except Exception:
+                self.logger.exception("Failed to load checkpoint")
+        return 0  # Start from ID 1
 
     def _save_checkpoint(self, press_id):
         """Save processed press release ID to checkpoint file.
 
-        TODO: For GitHub Actions, this local file approach doesn't work since files don't persist.
+        Uses cloudpathlib.AnyPath for unified local/S3 access - works in both
+        local development and GitHub Actions with S3 storage.
+
+        Only stores the latest press_id since we scrape sequentially.
         """
         try:
-            os.makedirs(os.path.dirname(self.checkpoint_file), exist_ok=True)
-            with open(self.checkpoint_file, "a") as f:
-                f.write(f"{press_id}\n")
+            # Just write the current press_id (single S3 PUT, not GET+PUT)
+            CHECKPOINT_PATH.write_text(str(press_id), encoding="utf-8")
         except Exception:
             self.logger.exception(f"Failed to save checkpoint for ID {press_id}")
 
@@ -132,13 +143,6 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         if self._should_stop:
             return
 
-        # Skip already processed IDs
-        while self.current_id in self.processed_ids:
-            self.logger.debug(
-                f"Skipping press release {self.current_id} (already processed)"
-            )
-            self.current_id += 1
-
         yield scrapy.Request(
             url=f"{BASE_URL}{self.current_id}",
             callback=self.parse,
@@ -151,29 +155,25 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         )
 
     def handle_error(self, failure):
-        """Handle request failures (network errors, timeouts, redirects, etc)."""
+        """Handle request failures — only treat definitive HTTP errors as missing."""
         press_id = failure.request.meta.get("press_id")
 
-        # Try to get the response status if available
         if hasattr(failure.value, "response") and failure.value.response:
+            # Definitive server response — treat as missing
             status = failure.value.response.status
             self.logger.error(
-                f"Request failed for press release {press_id}: "
-                f"HTTP {status} ({failure.type.__name__})"
+                f"Press release {press_id}: HTTP {status} ({failure.type.__name__})"
             )
-            reason = f"HTTP {status}"
+            if press_id:
+                self._handle_missing(press_id, f"HTTP {status}")
         else:
-            self.logger.error(
-                f"Request failed for press release {press_id}: "
-                f"{failure.type.__name__} - {failure.value}"
+            # Transient error (timeout, DNS, connection reset) — don't checkpoint or
+            # count toward consecutive_missing; Scrapy already exhausted RETRY_TIMES
+            self.logger.warning(
+                f"Transient error for press release {press_id}: "
+                f"{failure.type.__name__} — skipping without checkpointing"
             )
-            reason = f"network error: {failure.type.__name__}"
 
-        # Treat errors as missing press releases
-        if press_id:
-            self._handle_missing(press_id, reason)
-
-        # Generate next request to continue scraping
         self.current_id += 1
         yield from self._next_request()
 
@@ -245,7 +245,10 @@ class CiaaPressReleasesSpider(scrapy.Spider):
             '//div[@class="col-sm-8"]'
             '//a[contains(@class, "badge") and contains(@href, "/uploads/")]/@href'
         ).getall()
-        file_urls = [urljoin(response.url, link) for link in download_links]
+        # Remove duplicates while preserving order
+        file_urls = list(
+            dict.fromkeys(urljoin(response.url, link) for link in download_links)
+        )
 
         publication_date = self.guess_publication_date(title + "\n" + full_text)
 
