@@ -102,7 +102,7 @@ class CiaaPressReleasesSpider(scrapy.Spider):
             os.makedirs(os.path.dirname(self.checkpoint_file), exist_ok=True)
             with open(self.checkpoint_file, "a") as f:
                 f.write(f"{press_id}\n")
-        except Exception as e:
+        except Exception:
             self.logger.exception(f"Failed to save checkpoint for ID {press_id}")
 
     async def start(self):
