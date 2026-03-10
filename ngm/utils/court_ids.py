@@ -7,84 +7,115 @@ This module contains the identifiers for all courts in Nepal:
 """
 
 # High Courts in Nepal
+# Note: site_id must match the Supreme Court website's API numeric IDs
 HIGH_COURTS = [
     {
         "identifier": "biratnagarhc",
         "name": "उच्च अदालत विराटनगर",
         "name_en": "High Court Biratnagar",
+        "site_id": 1,
     },
-    {"identifier": "illamhc", "name": "उच्च अदालत इलाम", "name_en": "High Court Ilam"},
+    {
+        "identifier": "illamhc",
+        "name": "उच्च अदालत इलाम",
+        "name_en": "High Court Ilam",
+        "site_id": 2,
+    },
     {
         "identifier": "dhankutahc",
         "name": "उच्च अदालत धनकुटा",
         "name_en": "High Court Dhankuta",
+        "site_id": 3,
     },
     {
         "identifier": "okhaldhungahc",
         "name": "उच्च अदालत ओखलढुंगा",
         "name_en": "High Court Okhaldhunga",
+        "site_id": 4,
     },
     {
         "identifier": "janakpurhc",
         "name": "उच्च अदालत जनकपुर",
         "name_en": "High Court Janakpur",
+        "site_id": 5,
     },
     {
         "identifier": "rajbirajhc",
         "name": "उच्च अदालत राजविराज",
         "name_en": "High Court Rajbiraj",
+        "site_id": 6,
     },
     {
         "identifier": "birganjhc",
         "name": "उच्च अदालत वीरगंज",
         "name_en": "High Court Birgunj",
+        "site_id": 7,
     },
-    {"identifier": "patanhc", "name": "उच्च अदालत पाटन", "name_en": "High Court Patan"},
+    {
+        "identifier": "patanhc",
+        "name": "उच्च अदालत पाटन",
+        "name_en": "High Court Patan",
+        "site_id": 8,
+    },
     {
         "identifier": "hetaudahc",
         "name": "उच्च अदालत हेटौंडा",
         "name_en": "High Court Hetauda",
+        "site_id": 9,
     },
     {
         "identifier": "pokharahc",
         "name": "उच्च अदालत पोखरा",
         "name_en": "High Court Pokhara",
+        "site_id": 10,
     },
     {
         "identifier": "baglunghc",
         "name": "उच्च अदालत बागलुंग",
         "name_en": "High Court Baglung",
+        "site_id": 11,
     },
     {
         "identifier": "tulsipurhc",
         "name": "उच्च अदालत तुलसीपुर",
         "name_en": "High Court Tulsipur",
+        "site_id": 12,
     },
     {
         "identifier": "butwalhc",
         "name": "उच्च अदालत बुटवल",
         "name_en": "High Court Butwal",
+        "site_id": 13,
     },
     {
         "identifier": "nepalgunjhc",
         "name": "उच्च अदालत नेपालगंज",
         "name_en": "High Court Nepalgunj",
+        "site_id": 14,
     },
     {
         "identifier": "surkhethc",
         "name": "उच्च अदालत सुर्खेत",
         "name_en": "High Court Surkhet",
+        "site_id": 15,
     },
-    {"identifier": "jumlahc", "name": "उच्च अदालत जुम्ला", "name_en": "High Court Jumla"},
+    {
+        "identifier": "jumlahc",
+        "name": "उच्च अदालत जुम्ला",
+        "name_en": "High Court Jumla",
+        "site_id": 16,
+    },
     {
         "identifier": "dipayalhc",
         "name": "उच्च अदालत दिपायल",
         "name_en": "High Court Dipayal",
+        "site_id": 17,
     },
     {
         "identifier": "mahendranagarhc",
         "name": "उच्च अदालत महेन्द्रनगर",
         "name_en": "High Court Mahendranagar",
+        "site_id": 18,
     },
 ]
 

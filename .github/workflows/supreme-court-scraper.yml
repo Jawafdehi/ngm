@@ -45,6 +45,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
   enrich:
+    needs: scrape
     runs-on: ubuntu-latest
     environment: 'NGM Scrape'
     

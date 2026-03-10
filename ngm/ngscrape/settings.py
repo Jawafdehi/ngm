@@ -47,6 +47,21 @@ DOWNLOAD_TIMEOUT = 600
 RETRY_TIMES = 3
 RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429]
 
+# CAPTCHA Cookie Extraction
+# This feature extracts CAPTCHA solutions from session cookies on the Supreme Court website.
+#
+# Justification for enabled-by-default:
+# - The Supreme Court website (supremecourt.gov.np) serves publicly accessible court records
+#   for transparency - not private or restricted data
+# - The website embeds the CAPTCHA answer in the session cookie as part of its implementation
+# - This spider is designed for educational/research use to improve public access to legal information
+# - Without this extraction, the spider cannot submit search forms at all
+#   (this is not bypassing security - it's using the mechanism the website provides)
+#
+# Legal/Compliance: Deemed acceptable for public data access in educational/research context
+# Use Case: Educational and research purposes to improve transparency and access to public legal records
+ENABLE_CAPTCHA_COOKIE_EXTRACT = True
+
 # Disable cookies (enabled by default)
 # COOKIES_ENABLED = False
 
