@@ -34,9 +34,7 @@ from ngm.utils.normalizer import nepali_to_roman_numerals, normalize_whitespace
 BASE_URL = "https://ciaa.gov.np/pressrelease/"
 
 # Checkpoint file path (works with both local and S3 storage)
-CHECKPOINT_PATH = (
-    AnyPath(FILES_STORE) / "uploads" / "ciaa" / "press-releases" / ".checkpoint"
-)
+CHECKPOINT_PATH = AnyPath(FILES_STORE) / "ciaa" / "press-releases" / ".checkpoint"
 
 
 class CiaaPressReleasesSpider(scrapy.Spider):
@@ -47,9 +45,7 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         "ITEM_PIPELINES": {
             "ngm.ngscrape.pipelines.CiaaPressReleasesPipeline": 1,
         },
-        "FILES_STORE": str(
-            AnyPath(FILES_STORE) / "uploads" / "ciaa" / "press-releases"
-        ),
+        "FILES_STORE": str(AnyPath(FILES_STORE) / "ciaa" / "press-releases"),
         "MEDIA_ALLOW_REDIRECTS": False,  # Don't follow redirects for missing press releases
     }
 
@@ -181,11 +177,10 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         """
         Handle a missing press release (302 redirect or 4xx error).
 
-        Increments the consecutive-missing counter, checkpoints the ID, and
-        signals spider to stop once the threshold is reached.
+        Increments the consecutive-missing counter and signals spider to stop
+        once the threshold is reached.
         """
         self.consecutive_missing += 1
-        self._save_checkpoint(press_id)
         self.logger.debug(
             f"Press release {press_id} not found ({reason}) — "
             f"consecutive missing: {self.consecutive_missing}/{self.max_consecutive_missing}"
@@ -256,8 +251,6 @@ class CiaaPressReleasesSpider(scrapy.Spider):
             f"Press release {press_id}: {title[:50]}... "
             f"({len(file_urls)} files, date: {publication_date})"
         )
-
-        self._save_checkpoint(press_id)
 
         yield {
             "file_urls": file_urls,

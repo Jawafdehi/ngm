@@ -148,6 +148,11 @@ class CiaaPressReleasesPipeline(FilesPipeline):
                 info.spider.logger.info(
                     f"[{press_id}] Saved metadata: {json_file_path}"
                 )
+
+                # Save checkpoint after successful metadata save (durable output watermark)
+                if hasattr(info.spider, "_save_checkpoint"):
+                    info.spider._save_checkpoint(press_id)
+
             except Exception:
                 info.spider.logger.exception(
                     f"[{press_id}] Failed to save metadata {json_file_path}"
