@@ -8,10 +8,10 @@ writes to production.
 Usage:
     export DATABASE_URL='postgresql://user:pass@host:5432/prod_db'
     export LOCAL_DATABASE_URL='postgresql://user:pass@localhost:5433/local_db'
-    poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
+    poetry run python scripts/seed_local_db.py --confirm-prod-seed
 
     # Custom limit
-    poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
+    poetry run python scripts/seed_local_db.py --confirm-prod-seed --limit 100
 """
 
 import argparse
@@ -89,6 +89,7 @@ class DatabaseSeeder:
 
     def _connect_databases(self) -> None:
         """Establish connections to production and local databases."""
+        self._reset_engine_singleton()
         logger.info("Connecting to production database...")
         self.prod_engine = get_engine(self.prod_url)
         self.prod_session = get_session(self.prod_engine)
@@ -125,6 +126,7 @@ class DatabaseSeeder:
                         resource.dispose()
                 except Exception:
                     logger.exception(f"Error cleaning up {name}")
+        self._reset_engine_singleton()
 
     def _seed_courts(self) -> None:
         """Seed all courts from production to local database."""
@@ -336,10 +338,10 @@ def parse_arguments() -> argparse.Namespace:
         epilog="""
 Examples:
   # Seed with default limit (200 cases)
-  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed
+  poetry run python scripts/seed_local_db.py --confirm-prod-seed
 
   # Seed with custom limit
-  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed --limit 100
+  poetry run python scripts/seed_local_db.py --confirm-prod-seed --limit 100
 
 Environment Variables:
   DATABASE_URL        Production database connection URL (required)
@@ -387,9 +389,7 @@ def validate_environment() -> Tuple[str, str]:
         )
         logger.error("")
         logger.error("Then run:")
-        logger.error(
-            "  poetry run python ngm/scripts/seed_local_db.py --confirm-prod-seed"
-        )
+        logger.error("  poetry run python scripts/seed_local_db.py --confirm-prod-seed")
         sys.exit(1)
 
     return prod_url, local_url
