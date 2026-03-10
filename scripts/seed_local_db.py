@@ -73,10 +73,20 @@ class DatabaseSeeder:
             prod_url_obj = make_url(self.prod_url)
             local_url_obj = make_url(self.local_url)
 
-            # Compare full normalized URLs including query parameters
-            # This ensures different endpoints (unix sockets, Cloud SQL proxies, etc.) are detected
-            prod_normalized = prod_url_obj.render_as_string(hide_password=False)
-            local_normalized = local_url_obj.render_as_string(hide_password=False)
+            def _database_target(url_obj):
+                """Extract database target components ignoring credentials."""
+                return (
+                    url_obj.drivername.split("+", 1)[0],
+                    url_obj.host,
+                    url_obj.port,
+                    url_obj.database,
+                    tuple(sorted(url_obj.query.items())),
+                )
+
+            # Compare database targets without credentials
+            # This ensures different endpoints are detected while ignoring user/password differences
+            prod_normalized = _database_target(prod_url_obj)
+            local_normalized = _database_target(local_url_obj)
 
             if prod_normalized == local_normalized:
                 raise SafetyCheckError(
