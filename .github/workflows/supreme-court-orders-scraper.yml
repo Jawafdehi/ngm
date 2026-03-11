@@ -1,4 +1,4 @@
-name: Supreme Court Orders Scraper
+name: Court Orders Scraper
 
 on:
   schedule:
@@ -51,4 +51,4 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: 'auto'
-          FILES_STORE: 's3://ngm/uploads'
+          FILES_STORE: 's3://ngm/uploads/'
