@@ -166,25 +166,28 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         )
 
     def handle_error(self, failure):
-        """Handle request failures — only treat definitive HTTP errors as missing."""
+        """Handle request failures — only treat 302/404 as missing."""
         press_id = failure.request.meta.get("press_id")
 
         if hasattr(failure.value, "response") and failure.value.response:
-            # Definitive server response — treat as missing
             status = failure.value.response.status
-            self.logger.error(
-                f"Press release {press_id}: HTTP {status} ({failure.type.__name__})"
-            )
-            if press_id:
-                self._handle_missing(press_id, f"HTTP {status}")
+            if status in (302, 404):
+                self.logger.debug(f"Press release {press_id}: HTTP {status} (missing)")
+                if press_id:
+                    self._handle_missing(press_id, f"HTTP {status}")
+            else:
+                # Transient (429, 500, etc.) — don't checkpoint or count as missing
+                self.logger.warning(
+                    f"Press release {press_id}: HTTP {status} after retries — skipping"
+                )
         else:
-            # Transient error (timeout, DNS, connection reset) — don't checkpoint or
-            # count toward consecutive_missing; Scrapy already exhausted RETRY_TIMES
+            # Network error (timeout, DNS) — don't checkpoint or count as missing
             self.logger.warning(
-                f"Transient error for press release {press_id}: "
+                f"Transient network error for press release {press_id}: "
                 f"{failure.type.__name__} — skipping without checkpointing"
             )
 
+        # Always advance and continue — not advancing causes spider to hang
         self.current_id += 1
         yield from self._next_request()
 
@@ -216,14 +219,20 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         """Parse press release page and generate next request."""
         press_id = response.meta["press_id"]
 
-        if response.status == 302:
-            self._handle_missing(press_id, "302 redirect")
+        # Only 302 and 404 mean "press release doesn't exist"
+        if response.status in (302, 404):
+            self._handle_missing(press_id, f"HTTP {response.status}")
             self.current_id += 1
             yield from self._next_request()
             return
 
+        # Other error statuses (429, 500, 503, etc.) after retries exhausted
+        # Skip without checkpointing to avoid marking as processed
         if response.status >= 400:
-            self._handle_missing(press_id, f"HTTP {response.status}")
+            self.logger.warning(
+                f"Press release {press_id}: HTTP {response.status} after retries exhausted — "
+                f"skipping without checkpointing"
+            )
             self.current_id += 1
             yield from self._next_request()
             return

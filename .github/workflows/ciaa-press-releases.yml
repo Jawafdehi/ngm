@@ -6,8 +6,14 @@ on:
     - cron: '30 3 * * *'
   workflow_dispatch: # Allow manual trigger; spider self-terminates via consecutive-missing logic
 
+
 permissions:
   contents: read
+
+concurrency:
+  group: ciaa-press-releases-scraper
+  cancel-in-progress: false
+
 
 jobs:
   scrape:
