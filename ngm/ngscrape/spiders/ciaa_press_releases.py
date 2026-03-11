@@ -41,6 +41,9 @@ class CiaaPressReleasesSpider(scrapy.Spider):
     name = "ciaa_press_releases"
     allowed_domains = ["ciaa.gov.np"]
 
+    # Backfill flag: True when start_id is behind checkpoint (prevents checkpoint regression)
+    _is_backfill: bool = False
+
     custom_settings = {
         "ITEM_PIPELINES": {
             "ngm.ngscrape.pipelines.CiaaPressReleasesPipeline": 1,
@@ -64,7 +67,17 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         # Initialize current_id (source of truth for scraping position)
         if start_id is not None:
             self.current_id = int(start_id)
-            self._is_backfill = True  # Don't update checkpoint during backfill
+            # Only treat as backfill if start_id is behind the checkpoint
+            self._is_backfill = last_id > 0 and int(start_id) <= last_id
+            if self._is_backfill:
+                self.logger.info(
+                    f"Backfill run from ID {self.current_id} (checkpoint at {last_id}); "
+                    f"checkpoint updates suppressed."
+                )
+            else:
+                self.logger.info(
+                    f"Forward run from ID {self.current_id}; checkpoint updates enabled."
+                )
         elif last_id > 0:
             self.current_id = last_id + 1
             self._is_backfill = False
