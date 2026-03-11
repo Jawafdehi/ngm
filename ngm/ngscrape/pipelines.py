@@ -94,7 +94,7 @@ class CiaaPressReleasesPipeline(FilesPipeline):
         else:
             filename = f"{press_id} - {file_num}{ext}"
 
-        return posixpath.join("files", filename)
+        return posixpath.join("ciaa", "press-releases", "files", filename)
 
     def item_completed(self, results, item, info):
         """Save metadata and log download results."""
@@ -138,7 +138,9 @@ class CiaaPressReleasesPipeline(FilesPipeline):
             else:
                 json_filename = f"{press_id}.json"
 
-            json_file_path = posixpath.join("metadata", json_filename)
+            json_file_path = posixpath.join(
+                "ciaa", "press-releases", "metadata", json_filename
+            )
             json_bytes = json.dumps(simple_meta, ensure_ascii=False, indent=2).encode(
                 "utf-8"
             )
@@ -150,7 +152,10 @@ class CiaaPressReleasesPipeline(FilesPipeline):
                 )
 
                 # Save checkpoint after successful metadata save (durable output watermark)
-                if hasattr(info.spider, "_save_checkpoint"):
+                # Don't write checkpoints during backfill runs to prevent regressing the watermark
+                if hasattr(info.spider, "_save_checkpoint") and not getattr(
+                    info.spider, "_is_backfill", False
+                ):
                     info.spider._save_checkpoint(press_id)
 
             except Exception:

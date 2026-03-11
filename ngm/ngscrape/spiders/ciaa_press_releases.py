@@ -45,7 +45,6 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         "ITEM_PIPELINES": {
             "ngm.ngscrape.pipelines.CiaaPressReleasesPipeline": 1,
         },
-        "FILES_STORE": str(AnyPath(FILES_STORE) / "ciaa" / "press-releases"),
         "MEDIA_ALLOW_REDIRECTS": False,  # Don't follow redirects for missing press releases
     }
 
@@ -65,11 +64,14 @@ class CiaaPressReleasesSpider(scrapy.Spider):
         # Initialize current_id (source of truth for scraping position)
         if start_id is not None:
             self.current_id = int(start_id)
+            self._is_backfill = True  # Don't update checkpoint during backfill
         elif last_id > 0:
             self.current_id = last_id + 1
+            self._is_backfill = False
             self.logger.info(f"Resuming from press release ID {self.current_id}")
         else:
             self.current_id = 1
+            self._is_backfill = False
             self.logger.info("Starting from press release ID 1")
 
         self.consecutive_missing = 0
