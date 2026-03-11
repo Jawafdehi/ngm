@@ -40,10 +40,10 @@ jobs:
 
       - name: Run Supreme Court Orders scraper
         working-directory: ./ngm
-        # Processes up to 600 cases per 6-hour job at 100 cases/hour.
-        # Rate: DOWNLOAD_DELAY=18s × 2 requests/case = 36s/case → 100 cases/hour
-        # 100 cases/hour × 6 hours = 600 cases per job
-        run: poetry run scrapy crawl supreme_court_orders -a limit=600
+        # Processes up to 1200 cases per 6-hour job at 200 cases/hour.
+        # Rate: DOWNLOAD_DELAY=9s × 2 requests/case = 18s/case → 200 cases/hour
+        # 200 cases/hour × 6 hours = 1200 cases per job
+        run: poetry run scrapy crawl supreme_court_orders -a limit=1200
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ENABLE_CAPTCHA_COOKIE_EXTRACT: "True"
