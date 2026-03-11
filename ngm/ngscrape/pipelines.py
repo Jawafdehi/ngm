@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import posixpath
 import uuid
 from datetime import datetime
@@ -56,6 +57,112 @@ class KanunPatrikaPipeline(FilesPipeline):
                 info.spider.logger.info(f"Downloaded: {file_path}")
             else:
                 info.spider.logger.error(f"Failed: {item['file_urls'][0]}")
+        return item
+
+
+class CiaaPressReleasesPipeline(FilesPipeline):
+    """Pipeline for downloading CIAA Press Releases files with metadata."""
+
+    # Filesystem-unsafe chars. Denylist preserves Devanagari combining marks.
+    _UNSAFE_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|\x00]')
+
+    def _safe_filename(self, text: str, max_len: int = 100) -> str:
+        """Strip filesystem-unsafe characters from text for use in a filename."""
+        return self._UNSAFE_FILENAME_CHARS.sub("", text).strip()[:max_len]
+
+    def file_path(self, request, response=None, info=None, *, item=None):
+        """Generate custom file path based on metadata."""
+        metadata = item.get("metadata", {}) if item else {}
+        url_path = urlparse(request.url).path
+        file_name = posixpath.basename(url_path)
+        _file_id, ext = posixpath.splitext(file_name)
+
+        press_id = metadata.get("press_id", "")
+        title = metadata.get("title", "").replace("/", "-")
+        safe_title = self._safe_filename(title)
+
+        # Determine 1-based file number by position in file_urls.
+        # Avoid list.index() — raises ValueError on duplicates and is O(n).
+        all_urls = item.get("file_urls", []) if item else []
+        file_num = next(
+            (i + 1 for i, u in enumerate(all_urls) if u == request.url),
+            1,
+        )
+
+        if safe_title:
+            filename = f"{press_id}. {safe_title} - {file_num}{ext}"
+        else:
+            filename = f"{press_id} - {file_num}{ext}"
+
+        return posixpath.join("ciaa", "press-releases", "files", filename)
+
+    def item_completed(self, results, item, info):
+        """Save metadata and log download results."""
+        metadata = item.get("metadata", {})
+        press_id = metadata.get("press_id", "")
+        all_urls = item.get("file_urls", [])
+
+        file_names = []
+        for i, (ok, result) in enumerate(results):
+            if ok:
+                fp = result["path"]
+                file_names.append(posixpath.basename(fp))
+                info.spider.logger.info(f"[{press_id}] Downloaded: {fp}")
+            else:
+                url = all_urls[i] if i < len(all_urls) else "<unknown>"
+                error_msg = (
+                    result.getErrorMessage()
+                    if hasattr(result, "getErrorMessage")
+                    else str(result)
+                )
+                info.spider.logger.error(
+                    f"[{press_id}] Failed to download {url}: {error_msg}"
+                )
+
+        if metadata:
+            simple_meta = {
+                "press_id": press_id,
+                "title": metadata.get("title", ""),
+                "publication_date": metadata.get("publication_date", ""),
+                "full_text": metadata.get("full_text", ""),
+                "source_url": metadata.get("source_url", ""),
+                "file_names": file_names,
+            }
+
+            # Use same naming convention as files for consistency
+            safe_title = self._safe_filename(
+                metadata.get("title", "").replace("/", "-")
+            )
+            if safe_title:
+                json_filename = f"{press_id}. {safe_title}.json"
+            else:
+                json_filename = f"{press_id}.json"
+
+            json_file_path = posixpath.join(
+                "ciaa", "press-releases", "metadata", json_filename
+            )
+            json_bytes = json.dumps(simple_meta, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            )
+
+            try:
+                self.store.persist_file(json_file_path, BytesIO(json_bytes), info)
+                info.spider.logger.info(
+                    f"[{press_id}] Saved metadata: {json_file_path}"
+                )
+
+                # Save checkpoint after successful metadata save (durable output watermark)
+                # Don't write checkpoints during backfill runs to prevent regressing the watermark
+                if hasattr(info.spider, "_save_checkpoint") and not getattr(
+                    info.spider, "_is_backfill", False
+                ):
+                    info.spider._save_checkpoint(press_id)
+
+            except Exception:
+                info.spider.logger.exception(
+                    f"[{press_id}] Failed to save metadata {json_file_path}"
+                )
+
         return item
 
 
