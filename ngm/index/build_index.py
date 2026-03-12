@@ -31,7 +31,7 @@ class Indexer:
         return file_path.name
 
     def build_url(self, file_path) -> str:
-        """Construct the full public URL for a file."""
+        """Construct the full public URL for a file by joining base_url and relative path."""
         return f"{self.base_url}/{self.relative_path(file_path)}"
 
     def index(self) -> Tuple[str, List[Dict]]:
@@ -45,10 +45,12 @@ class Indexer:
 
 class CIAAAnnualReportsIndexer(Indexer):
     def __init__(self, root_path: str, base_url: str):
+        """Initialise the CIAA Annual Reports indexer."""
         super().__init__(root_path, base_url)
         self.source_name = "ciaa_annual_reports"
 
     def index(self) -> Tuple[str, List[Dict]]:
+        """Walk the annual-reports PDF directory and return one entry per PDF with metadata."""
         entries = []
         pdf_dir = self.root_path / "uploads" / "ciaa" / "annual-reports" / "pdf"
         metadata_dir = (
@@ -82,10 +84,12 @@ class CIAAAnnualReportsIndexer(Indexer):
 
 class KanunPatrikaIndexer(Indexer):
     def __init__(self, root_path: str, base_url: str):
+        """Initialise the Kanun Patrika indexer."""
         super().__init__(root_path, base_url)
         self.source_name = "kanun_patrika"
 
     def index(self) -> Tuple[str, List[Dict]]:
+        """Walk the kanun-patrika PDF directory and return one entry per PDF."""
         entries = []
         pdf_dir = self.root_path / "uploads" / "supreme-court" / "kanun-patrika"
 
@@ -106,10 +110,12 @@ class KanunPatrikaIndexer(Indexer):
 
 class CiaaPressReleasesIndexer(Indexer):
     def __init__(self, root_path: str, base_url: str):
+        """Initialise the CIAA Press Releases indexer."""
         super().__init__(root_path, base_url)
         self.source_name = "ciaa_press_releases"
 
     def index(self) -> Tuple[str, List[Dict]]:
+        """Walk press-releases metadata directory and return one entry per press release."""
         entries = []
         metadata_dir = (
             self.root_path / "uploads" / "ciaa" / "press-releases" / "metadata"
@@ -153,7 +159,7 @@ class CiaaPressReleasesIndexer(Indexer):
 
 
 def main():
-
+    """Build and write the global index from all configured indexers."""
     files_store_env = os.getenv("FILES_STORE")
     if not files_store_env:
         print("Error: FILES_STORE environment variable must be set.")
