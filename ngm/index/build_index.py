@@ -132,9 +132,28 @@ class CiaaPressReleasesIndexer(Indexer):
                 print(f"Warning: Failed to read metadata {metadata_path.name}: {e}")
                 continue
 
+            # Validate metadata structure
+            if not isinstance(metadata, dict):
+                print(
+                    f"Warning: Skipping metadata {metadata_path.name}: expected a JSON object"
+                )
+                continue
+
+            file_names = metadata.get("file_names", [])
+            if not isinstance(file_names, list):
+                print(
+                    f"Warning: Skipping metadata {metadata_path.name}: file_names must be a list"
+                )
+                continue
+
             # Build file entries from file_names recorded in metadata
             file_entries = []
-            for file_name in metadata.get("file_names", []):
+            for file_name in file_names:
+                if not isinstance(file_name, str):
+                    print(
+                        f"Warning: Skipping non-string file name in {metadata_path.name}: {file_name!r}"
+                    )
+                    continue
                 file_path = files_dir / file_name
                 file_entries.append(
                     {
