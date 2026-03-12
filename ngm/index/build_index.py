@@ -104,6 +104,54 @@ class KanunPatrikaIndexer(Indexer):
         return self.source_name, entries
 
 
+class CiaaPressReleasesIndexer(Indexer):
+    def __init__(self, root_path: str, base_url: str):
+        super().__init__(root_path, base_url)
+        self.source_name = "ciaa_press_releases"
+
+    def index(self) -> Tuple[str, List[Dict]]:
+        entries = []
+        metadata_dir = (
+            self.root_path / "uploads" / "ciaa" / "press-releases" / "metadata"
+        )
+        files_dir = self.root_path / "uploads" / "ciaa" / "press-releases" / "files"
+
+        if not metadata_dir.exists():
+            return self.source_name, entries
+
+        for metadata_path in metadata_dir.glob("*.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"Warning: Failed to read metadata {metadata_path.name}: {e}")
+                continue
+
+            # Build file entries from file_names recorded in metadata
+            file_entries = []
+            for file_name in metadata.get("file_names", []):
+                file_path = files_dir / file_name
+                file_entries.append(
+                    {
+                        "url": self.build_url(file_path),
+                        "file_name": file_name,
+                    }
+                )
+
+            entries.append(
+                {
+                    "press_id": metadata.get("press_id"),
+                    "title": metadata.get("title", ""),
+                    "publication_date": metadata.get("publication_date", ""),
+                    "source_url": metadata.get("source_url", ""),
+                    "full_text": metadata.get("full_text", ""),
+                    "files": file_entries,
+                }
+            )
+
+        entries.sort(key=lambda e: e.get("press_id") or 0)
+        return self.source_name, entries
+
+
 def main():
 
     files_store_env = os.getenv("FILES_STORE")
@@ -118,6 +166,7 @@ def main():
     indexers = [
         CIAAAnnualReportsIndexer(files_store, base_url),
         KanunPatrikaIndexer(files_store, base_url),
+        CiaaPressReleasesIndexer(files_store, base_url),
     ]
 
     global_index = {}
