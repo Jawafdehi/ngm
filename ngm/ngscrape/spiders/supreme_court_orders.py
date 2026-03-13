@@ -14,7 +14,7 @@ re-triggers every 8 hours so there is continuous coverage.
 
 Override the rate locally:
     scrapy crawl supreme_court_orders -s DOWNLOAD_DELAY=0 -a limit=500
-    
+
 Or override the limit:
     scrapy crawl supreme_court_orders -a limit=100
 """
@@ -37,7 +37,6 @@ from ngm.ngscrape.pipelines import (
     MIN_DAYS_FOR_DOCUMENT_AVAILABILITY,
     TOO_RECENT_RECHECK_DAYS,
 )
-
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 HOMEPAGE_URL = "https://supremecourt.gov.np/cp/"

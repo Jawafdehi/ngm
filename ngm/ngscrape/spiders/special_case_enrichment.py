@@ -353,7 +353,9 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
                         )
 
         # Extract related cases (लगाब मुद्दाहरुको विवरण)
-        related_heading = soup.find(string=lambda x: x and "लगाब मुद्दाहरुको विवरण" in x)
+        related_heading = soup.find(
+            string=lambda x: x and "लगाब मुद्दाहरुको विवरण" in x
+        )
         if related_heading:
             parent_row = related_heading.find_parent("tr")
             if parent_row:

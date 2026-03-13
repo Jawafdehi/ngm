@@ -29,7 +29,6 @@ from cloudpathlib import AnyPath
 from ngm.ngscrape.settings import FILES_STORE
 from ngm.utils.normalizer import nepali_to_roman_numerals, normalize_whitespace
 
-
 # Base URL for CIAA press releases
 BASE_URL = "https://ciaa.gov.np/pressrelease/"
 

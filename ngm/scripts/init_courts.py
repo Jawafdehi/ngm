@@ -6,7 +6,7 @@ supreme court, and special court. Uses "upsert" logic (insert or update).
 
 Usage:
     poetry run python ngm/scripts/init_courts.py
-    
+
     # With custom database URL
     DATABASE_URL='postgresql://user:pass@host:5432/db' poetry run python ngm/scripts/init_courts.py
 """
