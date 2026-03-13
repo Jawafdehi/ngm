@@ -31,7 +31,7 @@ class Indexer:
         return file_path.name
 
     def build_url(self, file_path) -> str:
-        """Construct the full public URL for a file."""
+        """Construct the full public URL for a file by joining base_url and relative path."""
         return f"{self.base_url}/{self.relative_path(file_path)}"
 
     def index(self) -> Tuple[str, List[Dict]]:
@@ -45,10 +45,12 @@ class Indexer:
 
 class CIAAAnnualReportsIndexer(Indexer):
     def __init__(self, root_path: str, base_url: str):
+        """Initialise the CIAA Annual Reports indexer."""
         super().__init__(root_path, base_url)
         self.source_name = "ciaa_annual_reports"
 
     def index(self) -> Tuple[str, List[Dict]]:
+        """Walk the annual-reports PDF directory and return one entry per PDF with metadata."""
         entries = []
         pdf_dir = self.root_path / "uploads" / "ciaa" / "annual-reports" / "pdf"
         metadata_dir = (
@@ -82,10 +84,12 @@ class CIAAAnnualReportsIndexer(Indexer):
 
 class KanunPatrikaIndexer(Indexer):
     def __init__(self, root_path: str, base_url: str):
+        """Initialise the Kanun Patrika indexer."""
         super().__init__(root_path, base_url)
         self.source_name = "kanun_patrika"
 
     def index(self) -> Tuple[str, List[Dict]]:
+        """Walk the kanun-patrika PDF directory and return one entry per PDF."""
         entries = []
         pdf_dir = self.root_path / "uploads" / "supreme-court" / "kanun-patrika"
 
@@ -104,8 +108,77 @@ class KanunPatrikaIndexer(Indexer):
         return self.source_name, entries
 
 
-def main():
+class CiaaPressReleasesIndexer(Indexer):
+    def __init__(self, root_path: str, base_url: str):
+        """Initialise the CIAA Press Releases indexer."""
+        super().__init__(root_path, base_url)
+        self.source_name = "ciaa_press_releases"
 
+    def index(self) -> Tuple[str, List[Dict]]:
+        """Walk press-releases metadata directory and return one entry per press release."""
+        entries = []
+        metadata_dir = (
+            self.root_path / "uploads" / "ciaa" / "press-releases" / "metadata"
+        )
+        files_dir = self.root_path / "uploads" / "ciaa" / "press-releases" / "files"
+
+        if not metadata_dir.exists():
+            return self.source_name, entries
+
+        for metadata_path in metadata_dir.glob("*.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"Warning: Failed to read metadata {metadata_path.name}: {e}")
+                continue
+
+            # Validate metadata structure
+            if not isinstance(metadata, dict):
+                print(
+                    f"Warning: Skipping metadata {metadata_path.name}: expected a JSON object"
+                )
+                continue
+
+            file_names = metadata.get("file_names", [])
+            if not isinstance(file_names, list):
+                print(
+                    f"Warning: Skipping metadata {metadata_path.name}: file_names must be a list"
+                )
+                continue
+
+            # Build file entries from file_names recorded in metadata
+            file_entries = []
+            for file_name in file_names:
+                if not isinstance(file_name, str):
+                    print(
+                        f"Warning: Skipping non-string file name in {metadata_path.name}: {file_name!r}"
+                    )
+                    continue
+                file_path = files_dir / file_name
+                file_entries.append(
+                    {
+                        "url": self.build_url(file_path),
+                        "file_name": file_name,
+                    }
+                )
+
+            entries.append(
+                {
+                    "press_id": metadata.get("press_id"),
+                    "title": metadata.get("title", ""),
+                    "publication_date": metadata.get("publication_date", ""),
+                    "source_url": metadata.get("source_url", ""),
+                    "full_text": metadata.get("full_text", ""),
+                    "files": file_entries,
+                }
+            )
+
+        entries.sort(key=lambda e: e.get("press_id") or 0)
+        return self.source_name, entries
+
+
+def main():
+    """Build and write the global index from all configured indexers."""
     files_store_env = os.getenv("FILES_STORE")
     if not files_store_env:
         print("Error: FILES_STORE environment variable must be set.")
@@ -118,6 +191,7 @@ def main():
     indexers = [
         CIAAAnnualReportsIndexer(files_store, base_url),
         KanunPatrikaIndexer(files_store, base_url),
+        CiaaPressReleasesIndexer(files_store, base_url),
     ]
 
     global_index = {}
