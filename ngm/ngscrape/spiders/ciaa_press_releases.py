@@ -259,14 +259,23 @@ class CiaaPressReleasesSpider(scrapy.Spider):
             if part.strip() and part.strip() not in ("Download", "Tweet", "डाउनलोड")
         )
 
-        # Download links
-        download_links = response.xpath(
+        # Download links - handle both badge class (PDF/DOC) and mailbox-attachment-name class (images)
+        badge_links = response.xpath(
             '//div[@class="col-sm-8"]'
             '//a[contains(@class, "badge") and contains(@href, "/uploads/")]/@href'
         ).getall()
+
+        image_links = response.xpath(
+            '//div[@class="col-sm-8"]'
+            '//a[contains(@class, "mailbox-attachment-name") and contains(@href, "/uploads/")]/@href'
+        ).getall()
+
+        # Combine all download links
+        all_download_links = badge_links + image_links
+
         # Remove duplicates while preserving order
         file_urls = list(
-            dict.fromkeys(urljoin(response.url, link) for link in download_links)
+            dict.fromkeys(urljoin(response.url, link) for link in all_download_links)
         )
 
         publication_date = self.guess_publication_date(title + "\n" + full_text)
