@@ -66,9 +66,15 @@ class CiaaPressReleasesPipeline(FilesPipeline):
     # Filesystem-unsafe chars. Denylist preserves Devanagari combining marks.
     _UNSAFE_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|\x00]')
 
-    def _safe_filename(self, text: str, max_len: int = 100) -> str:
-        """Strip filesystem-unsafe characters from text for use in a filename."""
-        return self._UNSAFE_FILENAME_CHARS.sub("", text).strip()[:max_len]
+    def _safe_filename(self, text: str, max_bytes: int = 230) -> str:
+        """Strip unsafe chars and truncate to max_bytes of UTF-8 (Devanagari = 3 bytes/char)."""
+        cleaned = self._UNSAFE_FILENAME_CHARS.sub("", text).strip()
+        encoded = cleaned.encode("utf-8")
+        if len(encoded) > max_bytes:
+            cleaned = encoded[:max_bytes].decode("utf-8", errors="ignore")
+        return cleaned.rstrip(
+            " ._-"
+        )  # remove trailing punctuation left by byte truncation
 
     def file_path(self, request, response=None, info=None, *, item=None):
         """Generate custom file path based on metadata."""
