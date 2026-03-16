@@ -6,14 +6,12 @@ on:
     - cron: '30 3 * * *'
   workflow_dispatch: # Allow manual trigger; spider self-terminates via consecutive-missing logic
 
-
 permissions:
   contents: read
 
 concurrency:
   group: ciaa-press-releases-scraper
   cancel-in-progress: false
-
 
 jobs:
   scrape:
@@ -41,10 +39,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-2.3.2-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
 
       - name: Run CIAA Press Releases scraper
