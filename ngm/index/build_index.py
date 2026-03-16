@@ -361,7 +361,7 @@ def main() -> None:
     try:
         builder.write_index_files(root)
         logger.info("Index v2.0 build completed successfully")
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, TypeError) as e:
         logger.error("Failed to write index files: %s", e)
         raise SystemExit(1) from None
 
