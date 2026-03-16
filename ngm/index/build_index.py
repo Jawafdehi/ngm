@@ -29,8 +29,9 @@ class IndexBuilder:
     def __init__(
         self, root_path: str, base_url: str, date_str: str, page_size: int = PAGE_SIZE
     ):
-        if page_size < 1:
-            raise ValueError("page_size must be >= 1")
+        page_size = int(page_size)  # Convert to int
+        if page_size <= 0:
+            raise ValueError("page_size must be > 0")
         self.root_path = AnyPath(root_path)
         self.base_url = base_url.rstrip("/")
         self.date_str = date_str
@@ -231,6 +232,13 @@ class IndexBuilder:
         """Write all index files to storage."""
         # Create indices directory
         indices_dir = self.root_path / "indices" / self.date_str
+
+        # Clean up existing directory to avoid stale files
+        if indices_dir.exists():
+            import shutil
+
+            shutil.rmtree(indices_dir)
+
         indices_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("Writing index files...")
