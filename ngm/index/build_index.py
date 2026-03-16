@@ -39,19 +39,16 @@ class IndexBuilder:
         self.page_size = page_size
 
     def _uploads_path(self, *parts: str):
-        """Build path under uploads/ directory, fallback to direct path if uploads/ doesn't exist."""
-        uploads_path = self.root_path / "uploads"
-        if uploads_path.exists():
-            p = uploads_path
-            for part in parts:
-                p = p / part
-            return p
-        else:
-            # Fallback to direct path for local testing
-            p = self.root_path
-            for part in parts:
-                p = p / part
-            return p
+        """Build path under uploads/ directory."""
+        # Always use uploads/ prefix for consistency with _build_url and write_index_files
+        uploads_dir = self.root_path / "uploads"
+        p = uploads_dir
+        for part in parts:
+            p = p / part
+        # Create directory if it doesn't exist
+        if parts:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        return p
 
     def _relative_path(self, file_path) -> str:
         """Get relative path string from a path object relative to root_path."""
@@ -200,6 +197,15 @@ class IndexBuilder:
 
             # Build manuscript entry for each PDF file
             for file_name in file_names:
+                # Validate file_name is a non-empty string
+                if not isinstance(file_name, str) or not file_name.strip():
+                    logger.warning(
+                        "Skipping invalid file_name in %s: %r",
+                        metadata_path.name,
+                        file_name,
+                    )
+                    continue
+
                 pdf_path = files_dir / file_name
                 manuscripts.append(
                     Manuscript(
@@ -235,9 +241,7 @@ class IndexBuilder:
 
         # Clean up existing directory to avoid stale files
         if indices_dir.exists():
-            import shutil
-
-            shutil.rmtree(indices_dir)
+            indices_dir.rmtree()
 
         indices_dir.mkdir(parents=True, exist_ok=True)
 
