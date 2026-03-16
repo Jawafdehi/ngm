@@ -29,11 +29,28 @@ class IndexBuilder:
     def __init__(
         self, root_path: str, base_url: str, date_str: str, page_size: int = PAGE_SIZE
     ):
+        if page_size < 1:
+            raise ValueError("page_size must be >= 1")
         self.root_path = AnyPath(root_path)
         self.base_url = base_url.rstrip("/")
         self.date_str = date_str
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
         self.page_size = page_size
+
+    def _uploads_path(self, *parts: str):
+        """Build path under uploads/ directory, fallback to direct path if uploads/ doesn't exist."""
+        uploads_path = self.root_path / "uploads"
+        if uploads_path.exists():
+            p = uploads_path
+            for part in parts:
+                p = p / part
+            return p
+        else:
+            # Fallback to direct path for local testing
+            p = self.root_path
+            for part in parts:
+                p = p / part
+            return p
 
     def _relative_path(self, file_path) -> str:
         """Get relative path string from a path object relative to root_path."""
@@ -76,13 +93,13 @@ class IndexBuilder:
 
     def _build_kanun_patrika_node(self) -> IndexNode | None:
         """Build kanun-patrika node with manuscripts."""
-        pdf_dir = self.root_path / "supreme-court" / "kanun-patrika"
+        pdf_dir = self._uploads_path("supreme-court", "kanun-patrika")
 
         if not pdf_dir.exists():
             return None
 
         manuscripts = []
-        for pdf_path in pdf_dir.glob("*.pdf"):
+        for pdf_path in sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name):
             manuscripts.append(
                 Manuscript(
                     url=self._build_url(pdf_path), file_name=pdf_path.name, metadata={}
@@ -99,14 +116,14 @@ class IndexBuilder:
 
     def _build_ciaa_annual_reports_node(self) -> IndexNode | None:
         """Build CIAA annual reports node with manuscripts and metadata."""
-        pdf_dir = self.root_path / "ciaa" / "annual-reports" / "pdf"
-        metadata_dir = self.root_path / "ciaa" / "annual-reports" / "metadata"
+        pdf_dir = self._uploads_path("ciaa", "annual-reports", "pdf")
+        metadata_dir = self._uploads_path("ciaa", "annual-reports", "metadata")
 
         if not pdf_dir.exists():
             return None
 
         manuscripts = []
-        for pdf_path in pdf_dir.glob("*.pdf"):
+        for pdf_path in sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name):
             # Load metadata if available
             metadata = {}
             file_id = pdf_path.stem
@@ -144,14 +161,14 @@ class IndexBuilder:
 
     def _build_ciaa_press_releases_node(self) -> IndexNode | None:
         """Build CIAA press releases node with manuscripts and metadata."""
-        metadata_dir = self.root_path / "ciaa" / "press-releases" / "metadata"
-        files_dir = self.root_path / "ciaa" / "press-releases" / "files"
+        metadata_dir = self._uploads_path("ciaa", "press-releases", "metadata")
+        files_dir = self._uploads_path("ciaa", "press-releases", "files")
 
         if not metadata_dir.exists():
             return None
 
         manuscripts = []
-        for metadata_path in metadata_dir.glob("*.json"):
+        for metadata_path in sorted(metadata_dir.glob("*.json"), key=lambda p: p.name):
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as e:
