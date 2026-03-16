@@ -115,8 +115,14 @@ class IndexBuilder:
             if metadata_path.exists():
                 try:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                except Exception as e:
-                    logger.warning("Failed to read metadata for %s: %s", file_id, e)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "Failed to parse JSON metadata for %s: %s", file_id, e
+                    )
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.warning(
+                        "Failed to read metadata file for %s: %s", file_id, e
+                    )
 
             manuscripts.append(
                 Manuscript(
@@ -148,8 +154,15 @@ class IndexBuilder:
         for metadata_path in metadata_dir.glob("*.json"):
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                logger.warning("Failed to read metadata %s: %s", metadata_path.name, e)
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "Failed to parse JSON metadata %s: %s", metadata_path.name, e
+                )
+                continue
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(
+                    "Failed to read metadata file %s: %s", metadata_path.name, e
+                )
                 continue
 
             # Validation checks
@@ -342,15 +355,15 @@ def main() -> None:
         logger.info("Tree validation passed")
     except ValueError as e:
         logger.error("Tree validation failed: %s", e)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     # Write files
     try:
         builder.write_index_files(root)
         logger.info("Index v2.0 build completed successfully")
-    except Exception as e:
+    except (OSError, json.JSONDecodeError) as e:
         logger.error("Failed to write index files: %s", e)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
