@@ -6,6 +6,9 @@ on:
     - cron: '32 1,9,17 * * *'
   workflow_dispatch: # Allow manual trigger
 
+env:
+  POETRY_VERSION: '2.3.2'
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -23,7 +26,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: latest
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
       
@@ -32,10 +35,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-hcs-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
       
       - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
 
       - name: Run High Court scraper
@@ -60,7 +62,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: latest
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
       
@@ -69,10 +71,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
       
       - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
 
       - name: Run High Court enrichment spider

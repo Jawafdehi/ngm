@@ -6,6 +6,8 @@ on:
     - cron: '30 3 * * *'
   workflow_dispatch: # Allow manual trigger; spider self-terminates via consecutive-missing logic
 
+env:
+  POETRY_VERSION: '2.3.2'
 
 permissions:
   contents: read
@@ -13,7 +15,6 @@ permissions:
 concurrency:
   group: ciaa-press-releases-scraper
   cancel-in-progress: false
-
 
 jobs:
   scrape:
@@ -32,7 +33,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.3.2
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
 
@@ -41,10 +42,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
 
       - name: Run CIAA Press Releases scraper
