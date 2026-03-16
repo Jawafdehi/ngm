@@ -6,6 +6,9 @@ on:
     - cron: '30 3 * * *'
   workflow_dispatch: # Allow manual trigger
 
+env:
+  POETRY_VERSION: '2.3.2'
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -23,7 +26,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.3.2
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
       
@@ -32,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-2.3.2-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
       
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
@@ -59,7 +62,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.3.2
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
       
@@ -68,7 +71,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-2.3.2-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
       
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
