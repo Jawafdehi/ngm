@@ -29,10 +29,8 @@ def _rmtree(path) -> None:
     """Remove a directory tree — works for both local (pathlib) and cloud (cloudpathlib) paths."""
     if isinstance(path, pathlib.Path):
         shutil.rmtree(path)
-    elif hasattr(path, "rmtree"):  # CloudPath or similar
-        path.rmtree()
     else:
-        raise TypeError(f"Unsupported path type for _rmtree: {type(path)}")
+        path.rmtree()
 
 
 class IndexBuilder:
@@ -57,7 +55,7 @@ class IndexBuilder:
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
         self.page_size = page_size
 
-    def _build_folder_path(self, *parts: str):
+    def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
         p = self.root_path / "uploads"
         for part in parts:
@@ -65,12 +63,17 @@ class IndexBuilder:
         return p
 
     def _relative_path(self, file_path) -> str:
-        """Get relative path string from a path object relative to root_path."""
+        """Get relative path string from a path object relative to root_path.
+
+        Raises ValueError if file_path is not under root_path — callers should
+        never pass paths outside the configured store root.
+        """
         try:
             return str(file_path.relative_to(self.root_path))
-        except ValueError:
-            # If file_path is not relative to root_path, just return the name
-            return file_path.name
+        except ValueError as e:
+            raise ValueError(
+                f"Path '{file_path}' is outside root_path '{self.root_path}'"
+            ) from e
 
     def _build_url(self, file_path) -> str:
         """Construct the full public URL for a file."""
@@ -106,7 +109,7 @@ class IndexBuilder:
 
     def _build_kanun_patrika_node(self) -> IndexNode | None:
         """Build kanun-patrika node with manuscripts."""
-        pdf_dir = self._build_folder_path("supreme-court", "kanun-patrika")
+        pdf_dir = self._build_folder_structure("supreme-court", "kanun-patrika")
 
         if not pdf_dir.exists():
             return None
@@ -129,8 +132,10 @@ class IndexBuilder:
 
     def _build_ciaa_annual_reports_node(self) -> IndexNode | None:
         """Build CIAA annual reports node with manuscripts and metadata."""
-        pdf_dir = self._build_folder_path("ciaa", "annual-reports", "pdf")
-        metadata_dir = self._build_folder_path("ciaa", "annual-reports", "metadata")
+        pdf_dir = self._build_folder_structure("ciaa", "annual-reports", "pdf")
+        metadata_dir = self._build_folder_structure(
+            "ciaa", "annual-reports", "metadata"
+        )
 
         if not pdf_dir.exists():
             return None
@@ -180,8 +185,10 @@ class IndexBuilder:
 
     def _build_ciaa_press_releases_node(self) -> IndexNode | None:
         """Build CIAA press releases node with manuscripts and metadata."""
-        metadata_dir = self._build_folder_path("ciaa", "press-releases", "metadata")
-        files_dir = self._build_folder_path("ciaa", "press-releases", "files")
+        metadata_dir = self._build_folder_structure(
+            "ciaa", "press-releases", "metadata"
+        )
+        files_dir = self._build_folder_structure("ciaa", "press-releases", "files")
 
         if not metadata_dir.exists():
             return None
