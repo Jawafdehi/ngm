@@ -45,6 +45,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     root = Path(args.root)
+
+    # If root is relative, resolve it from current working directory
+    if not root.is_absolute():
+        root = Path.cwd() / root
     if not root.is_dir():
         raise SystemExit(f" Index root directory not found: {root}")
 
