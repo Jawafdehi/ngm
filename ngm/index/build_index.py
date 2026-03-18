@@ -11,6 +11,8 @@ This module implements the new tree-based index system where:
 import json
 import logging
 import os
+import pathlib
+import shutil
 from datetime import datetime
 from typing import Any
 from cloudpathlib import AnyPath
@@ -20,16 +22,31 @@ from .models import Manuscript, IndexNode
 logger = logging.getLogger(__name__)
 
 # Configuration
-PAGE_SIZE = 300  # Number of manuscripts per page
+DEFAULT_PAGE_SIZE = 300  # Number of manuscripts per index page
+
+
+def _rmtree(path) -> None:
+    """Remove a directory tree — works for both local (pathlib) and cloud (cloudpathlib) paths."""
+    if isinstance(path, pathlib.Path):
+        shutil.rmtree(path)
+    else:
+        path.rmtree()
 
 
 class IndexBuilder:
     """Builds the hierarchical index tree and writes JSON files."""
 
     def __init__(
-        self, root_path: str, base_url: str, date_str: str, page_size: int = PAGE_SIZE
+        self,
+        root_path: str,
+        base_url: str,
+        date_str: str,
+        page_size: int = DEFAULT_PAGE_SIZE,
     ):
-        page_size = int(page_size)  # Convert to int
+        try:
+            page_size = int(page_size)  # Convert to int
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"page_size must be a valid integer: {e}") from e
         if page_size <= 0:
             raise ValueError("page_size must be > 0")
         self.root_path = AnyPath(root_path)
@@ -38,16 +55,11 @@ class IndexBuilder:
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
         self.page_size = page_size
 
-    def _uploads_path(self, *parts: str):
-        """Build path under uploads/ directory."""
-        # Always use uploads/ prefix for consistency with _build_url and write_index_files
-        uploads_dir = self.root_path / "uploads"
-        p = uploads_dir
+    def _build_folder_structure(self, *parts: str):
+        """Build path under uploads/ directory (FILES_STORE is the bucket/output root)."""
+        p = self.root_path / "uploads"
         for part in parts:
             p = p / part
-        # Create directory if it doesn't exist
-        if parts:
-            p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
     def _relative_path(self, file_path) -> str:
@@ -55,8 +67,7 @@ class IndexBuilder:
         root_str = str(self.root_path).rstrip("/")
         file_str = str(file_path)
         if file_str.startswith(root_str):
-            rel = file_str.replace(root_str, "", 1).lstrip("/")
-            return rel
+            return file_str.replace(root_str, "", 1).lstrip("/")
         return file_path.name
 
     def _build_url(self, file_path) -> str:
@@ -84,6 +95,8 @@ class IndexBuilder:
                 count = self._count_manuscripts_in_tree(node)
                 total_manuscripts += count
                 logger.info("Indexed %d items for %s", count, node.name)
+            else:
+                logger.info("No data found for %s", builder_fn.__name__)
 
         root.children = nodes_to_add
         logger.info("Total manuscripts indexed: %d", total_manuscripts)
@@ -91,7 +104,7 @@ class IndexBuilder:
 
     def _build_kanun_patrika_node(self) -> IndexNode | None:
         """Build kanun-patrika node with manuscripts."""
-        pdf_dir = self._uploads_path("supreme-court", "kanun-patrika")
+        pdf_dir = self._build_folder_structure("supreme-court", "kanun-patrika")
 
         if not pdf_dir.exists():
             return None
@@ -114,8 +127,10 @@ class IndexBuilder:
 
     def _build_ciaa_annual_reports_node(self) -> IndexNode | None:
         """Build CIAA annual reports node with manuscripts and metadata."""
-        pdf_dir = self._uploads_path("ciaa", "annual-reports", "pdf")
-        metadata_dir = self._uploads_path("ciaa", "annual-reports", "metadata")
+        pdf_dir = self._build_folder_structure("ciaa", "annual-reports", "pdf")
+        metadata_dir = self._build_folder_structure(
+            "ciaa", "annual-reports", "metadata"
+        )
 
         if not pdf_dir.exists():
             return None
@@ -129,7 +144,13 @@ class IndexBuilder:
 
             if metadata_path.exists():
                 try:
-                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if not isinstance(raw, dict):
+                        logger.warning(
+                            "Skipping metadata %s: expected a JSON object", file_id
+                        )
+                    else:
+                        metadata = raw
                 except json.JSONDecodeError as e:
                     logger.warning(
                         "Failed to parse JSON metadata for %s: %s", file_id, e
@@ -159,8 +180,10 @@ class IndexBuilder:
 
     def _build_ciaa_press_releases_node(self) -> IndexNode | None:
         """Build CIAA press releases node with manuscripts and metadata."""
-        metadata_dir = self._uploads_path("ciaa", "press-releases", "metadata")
-        files_dir = self._uploads_path("ciaa", "press-releases", "files")
+        metadata_dir = self._build_folder_structure(
+            "ciaa", "press-releases", "metadata"
+        )
+        files_dir = self._build_folder_structure("ciaa", "press-releases", "files")
 
         if not metadata_dir.exists():
             return None
@@ -241,7 +264,7 @@ class IndexBuilder:
 
         # Clean up existing directory to avoid stale files
         if indices_dir.exists():
-            indices_dir.rmtree()
+            _rmtree(indices_dir)
 
         indices_dir.mkdir(parents=True, exist_ok=True)
 
