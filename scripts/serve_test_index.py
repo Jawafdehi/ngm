@@ -39,12 +39,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--root",
-        default=os.getenv("INDEX_OUTPUT_ROOT", os.getenv("FILES_STORE", "output")),
-        help="Root directory to serve (default: INDEX_OUTPUT_ROOT or FILES_STORE env var, or 'output')",
+        default=os.getenv("INDEX_OUTPUT_ROOT"),
+        help="Root directory to serve (default: INDEX_OUTPUT_ROOT, then local FILES_STORE, then 'output')",
     )
     args = parser.parse_args()
 
-    root = Path(args.root)
+    root_arg = args.root or os.getenv("FILES_STORE") or "output"
+    # FILES_STORE can be remote (e.g., s3://...), which is not serveable by this local HTTP server.
+    if "://" in root_arg and not root_arg.startswith("file://"):
+        root_arg = "output"
+    if root_arg.startswith("file://"):
+        root_arg = root_arg[len("file://") :]
+    root = Path(root_arg).expanduser()
 
     # If root is relative, resolve it from current working directory
     if not root.is_absolute():
