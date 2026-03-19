@@ -37,4 +37,4 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: 'auto'
           NGM_STORE_BASE_URL: https://ngm-store.newnepal.org
-        run: poetry run python ngm/index/build_index.py
+        run: poetry run python -m ngm.index.build_index
