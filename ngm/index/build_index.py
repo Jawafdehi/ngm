@@ -57,7 +57,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path / "uploads"
+        p = self.root_path
         for part in parts:
             p = p / part
         return p
@@ -69,7 +69,12 @@ class IndexBuilder:
         never pass paths outside the configured store root.
         """
         try:
-            return str(file_path.relative_to(self.root_path))
+            relative = file_path.relative_to(self.root_path)
+            return (
+                relative.as_posix()
+                if hasattr(relative, "as_posix")
+                else str(relative).replace("\\", "/")
+            )
         except ValueError as e:
             raise ValueError(
                 f"Path '{file_path}' is outside root_path '{self.root_path}'"
@@ -264,19 +269,32 @@ class IndexBuilder:
 
     def write_index_files(self, root: IndexNode) -> None:
         """Write all index files to storage."""
-        # Create indices directory
-        indices_dir = self.root_path / "indices" / self.date_str
+        # Create temporary build directory to avoid partial snapshots
+        import uuid
 
-        # Clean up existing directory to avoid stale files
-        if indices_dir.exists():
-            _rmtree(indices_dir)
+        build_id = uuid.uuid4().hex[:8]
+        temp_dir = self.root_path / "indices" / f"{self.date_str}_build_{build_id}"
+        final_dir = self.root_path / "indices" / self.date_str
 
-        indices_dir.mkdir(parents=True, exist_ok=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Writing index files...")
+        logger.info("Writing index files to temporary directory...")
 
         # Single-pass recursive walk - handles any tree depth
-        self._write_node(root, indices_dir)
+        self._write_node(root, temp_dir)
+
+        # Atomic swap: move temp to final location
+        if final_dir.exists():
+            _rmtree(final_dir)
+
+        # Rename temp directory to final directory
+        if isinstance(temp_dir, pathlib.Path):
+            temp_dir.rename(final_dir)
+        else:
+            # For cloud paths, use move semantics
+            temp_dir.rename(final_dir)
+
+        logger.info("Successfully moved index files to %s", final_dir)
 
         # Copy root index to index-v2.json at root level
         root_index_path = self.root_path / "index-v2.json"
@@ -333,10 +351,12 @@ class IndexBuilder:
                 name=node.name, path=node.path, manuscripts=page_manuscripts
             )
 
-            # Add next link if not the last page
+            # Add next link if not the last page, otherwise explicitly set to None
             if page_num < total_pages - 1:
                 next_filename = f"{base_filename}.page-{page_num + 2}.json"
                 page_node.next_url = f"{self.indices_base_url}/{next_filename}"
+            else:
+                page_node.next_url = None
 
             # Write page file
             file_path = indices_dir / filename
@@ -373,8 +393,11 @@ class IndexBuilder:
         if node.manuscripts:
             result["manuscripts"] = [ms.to_dict() for ms in node.manuscripts]
 
-        if node.next_url:
+        if node.next_url is not None:
             result["next"] = node.next_url
+        elif hasattr(node, "next_url"):
+            # Explicitly include "next": null for paginated nodes
+            result["next"] = None
 
         return result
 
