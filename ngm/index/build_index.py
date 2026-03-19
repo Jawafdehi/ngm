@@ -22,7 +22,7 @@ from .models import Manuscript, IndexNode
 logger = logging.getLogger(__name__)
 
 # Configuration
-DEFAULT_PAGE_SIZE = 300  # Number of manuscripts per index page
+DEFAULT_PAGE_SIZE = 30  # Number of manuscripts per index page
 
 
 def _rmtree(path) -> None:
