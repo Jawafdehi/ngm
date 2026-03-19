@@ -269,39 +269,15 @@ class IndexBuilder:
 
     def write_index_files(self, root: IndexNode) -> None:
         """Write all index files to storage."""
-        # Create temporary build directory to avoid partial snapshots
-        import uuid
+        indices_dir = self.root_path / "indices" / self.date_str
+        indices_dir.mkdir(parents=True, exist_ok=True)
 
-        build_id = uuid.uuid4().hex[:8]
-        temp_dir = self.root_path / "indices" / f"{self.date_str}_build_{build_id}"
-        final_dir = self.root_path / "indices" / self.date_str
-
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Writing index files to temporary directory...")
+        logger.info("Writing index files...")
 
         # Single-pass recursive walk - handles any tree depth
-        self._write_node(root, temp_dir)
+        self._write_node(root, indices_dir)
 
-        # Atomic swap: move temp to final location
-        if isinstance(temp_dir, pathlib.Path):
-            if final_dir.exists():
-                _rmtree(final_dir)
-            # Local filesystem: simple rename
-            temp_dir.rename(final_dir)
-        else:
-            # Cloud storage: copy all files then cleanup
-            final_dir.mkdir(parents=True, exist_ok=True)
-            for file_path in temp_dir.rglob("*.json"):
-                if file_path.is_dir():
-                    continue
-                relative = file_path.relative_to(temp_dir)
-                dest_path = final_dir / relative
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                dest_path.write_bytes(file_path.read_bytes())
-            _rmtree(temp_dir)
-
-        logger.info("Successfully moved index files to %s", final_dir)
+        logger.info("Successfully wrote index files to %s", indices_dir)
 
         # Copy root index to index-v2.json at root level
         root_index_path = self.root_path / "index-v2.json"
