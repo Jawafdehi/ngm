@@ -11,8 +11,6 @@ This module implements the new tree-based index system where:
 import json
 import logging
 import os
-import pathlib
-import shutil
 from datetime import datetime
 from typing import Any
 from cloudpathlib import AnyPath
@@ -23,14 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DEFAULT_PAGE_SIZE = 30  # Number of manuscripts per index page
-
-
-def _rmtree(path) -> None:
-    """Remove a directory tree — works for both local (pathlib) and cloud (cloudpathlib) paths."""
-    if isinstance(path, pathlib.Path):
-        shutil.rmtree(path)
-    else:
-        path.rmtree()
 
 
 class IndexBuilder:
