@@ -57,7 +57,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path
+        p = self.root_path / "uploads"
         for part in parts:
             p = p / part
         return p
@@ -287,12 +287,21 @@ class IndexBuilder:
         if final_dir.exists():
             _rmtree(final_dir)
 
-        # Rename temp directory to final directory
+        # For cloud paths (S3), we need to copy files individually
         if isinstance(temp_dir, pathlib.Path):
+            # Local filesystem: simple rename
             temp_dir.rename(final_dir)
         else:
-            # For cloud paths, use move semantics
-            temp_dir.rename(final_dir)
+            # Cloud storage: copy all files then cleanup
+            final_dir.mkdir(parents=True, exist_ok=True)
+            for file_path in temp_dir.rglob("*.json"):
+                if file_path.is_dir():
+                    continue
+                relative = file_path.relative_to(temp_dir)
+                dest_path = final_dir / relative
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_bytes(file_path.read_bytes())
+            _rmtree(temp_dir)
 
         logger.info("Successfully moved index files to %s", final_dir)
 
