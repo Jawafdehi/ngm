@@ -284,11 +284,9 @@ class IndexBuilder:
         self._write_node(root, temp_dir)
 
         # Atomic swap: move temp to final location
-        if final_dir.exists():
-            _rmtree(final_dir)
-
-        # For cloud paths (S3), we need to copy files individually
         if isinstance(temp_dir, pathlib.Path):
+            if final_dir.exists():
+                _rmtree(final_dir)
             # Local filesystem: simple rename
             temp_dir.rename(final_dir)
         else:
