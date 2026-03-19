@@ -142,23 +142,21 @@ class IndexBuilder:
             file_id = pdf_path.stem
             metadata_path = metadata_dir / f"{file_id}.json"
 
-            if metadata_path.exists():
-                try:
-                    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    if not isinstance(raw, dict):
-                        logger.warning(
-                            "Skipping metadata %s: expected a JSON object", file_id
-                        )
-                    else:
-                        metadata = raw
-                except json.JSONDecodeError as e:
+            try:
+                raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
                     logger.warning(
-                        "Failed to parse JSON metadata for %s: %s", file_id, e
+                        "Skipping metadata %s: expected a JSON object", file_id
                     )
-                except (OSError, UnicodeDecodeError) as e:
-                    logger.warning(
-                        "Failed to read metadata file for %s: %s", file_id, e
-                    )
+                else:
+                    metadata = raw
+            except FileNotFoundError:
+                # No metadata file for this PDF
+                pass
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse JSON metadata for %s: %s", file_id, e)
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to read metadata file for %s: %s", file_id, e)
 
             manuscripts.append(
                 Manuscript(
