@@ -255,7 +255,11 @@ class IndexBuilder:
                     f" — got {type(metadata).__name__}"
                 )
 
-            file_names = metadata.get("file_names", [])
+            if "file_names" not in metadata:
+                raise ValueError(
+                    f"ciaa-press-releases: {metadata_path.name} missing file_names"
+                )
+            file_names = metadata["file_names"]
             if not isinstance(file_names, list):
                 raise ValueError(
                     f"ciaa-press-releases: {metadata_path.name}"
