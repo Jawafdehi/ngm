@@ -11,8 +11,6 @@ This module implements the new tree-based index system where:
 import json
 import logging
 import os
-import pathlib
-import shutil
 from datetime import datetime
 from typing import Any
 from cloudpathlib import AnyPath
@@ -23,14 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DEFAULT_PAGE_SIZE = 30  # Number of manuscripts per index page
-
-
-def _rmtree(path) -> None:
-    """Remove a directory tree — works for both local (pathlib) and cloud (cloudpathlib) paths."""
-    if isinstance(path, pathlib.Path):
-        shutil.rmtree(path)
-    else:
-        path.rmtree()
 
 
 class IndexBuilder:
@@ -57,7 +47,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path
+        p = self.root_path / "uploads"
         for part in parts:
             p = p / part
         return p
@@ -152,23 +142,21 @@ class IndexBuilder:
             file_id = pdf_path.stem
             metadata_path = metadata_dir / f"{file_id}.json"
 
-            if metadata_path.exists():
-                try:
-                    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    if not isinstance(raw, dict):
-                        logger.warning(
-                            "Skipping metadata %s: expected a JSON object", file_id
-                        )
-                    else:
-                        metadata = raw
-                except json.JSONDecodeError as e:
+            try:
+                raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
                     logger.warning(
-                        "Failed to parse JSON metadata for %s: %s", file_id, e
+                        "Skipping metadata %s: expected a JSON object", file_id
                     )
-                except (OSError, UnicodeDecodeError) as e:
-                    logger.warning(
-                        "Failed to read metadata file for %s: %s", file_id, e
-                    )
+                else:
+                    metadata = raw
+            except FileNotFoundError:
+                # No metadata file for this PDF
+                pass
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse JSON metadata for %s: %s", file_id, e)
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to read metadata file for %s: %s", file_id, e)
 
             manuscripts.append(
                 Manuscript(
@@ -269,32 +257,15 @@ class IndexBuilder:
 
     def write_index_files(self, root: IndexNode) -> None:
         """Write all index files to storage."""
-        # Create temporary build directory to avoid partial snapshots
-        import uuid
+        indices_dir = self.root_path / "indices" / self.date_str
+        indices_dir.mkdir(parents=True, exist_ok=True)
 
-        build_id = uuid.uuid4().hex[:8]
-        temp_dir = self.root_path / "indices" / f"{self.date_str}_build_{build_id}"
-        final_dir = self.root_path / "indices" / self.date_str
-
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Writing index files to temporary directory...")
+        logger.info("Writing index files...")
 
         # Single-pass recursive walk - handles any tree depth
-        self._write_node(root, temp_dir)
+        self._write_node(root, indices_dir)
 
-        # Atomic swap: move temp to final location
-        if final_dir.exists():
-            _rmtree(final_dir)
-
-        # Rename temp directory to final directory
-        if isinstance(temp_dir, pathlib.Path):
-            temp_dir.rename(final_dir)
-        else:
-            # For cloud paths, use move semantics
-            temp_dir.rename(final_dir)
-
-        logger.info("Successfully moved index files to %s", final_dir)
+        logger.info("Successfully wrote index files to %s", indices_dir)
 
         # Copy root index to index-v2.json at root level
         root_index_path = self.root_path / "index-v2.json"
