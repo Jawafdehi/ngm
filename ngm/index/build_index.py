@@ -17,12 +17,12 @@ from typing import Any
 
 from cloudpathlib import AnyPath
 
-from .models import IndexNode, Manuscript
+from .models import Manuscript, IndexNode
 
 logger = logging.getLogger(__name__)
 
 # Configuration
-DEFAULT_PAGE_SIZE = 30  # Number of manuscripts per index page
+DEFAULT_PAGE_SIZE = 100  # Number of manuscripts per index page
 _MAX_WRITE_WORKERS = 10  # Parallel S3 PUT workers
 
 
@@ -37,7 +37,7 @@ class IndexBuilder:
         page_size: int = DEFAULT_PAGE_SIZE,
     ):
         try:
-            page_size = int(page_size)
+            page_size = int(page_size)  # Convert to int
         except (ValueError, TypeError) as e:
             raise ValueError(f"page_size must be a valid integer: {e}") from e
         if page_size <= 0:
@@ -85,6 +85,8 @@ class IndexBuilder:
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
+            # TODO: Add court orders builder once _build_court_orders_node,
+            # _build_court_type_node, and _build_court_year_leaf_node are implemented.
         )
 
         # Each builder scans S3 independently — run them concurrently.
@@ -207,6 +209,7 @@ class IndexBuilder:
         if not manuscripts:
             return None
 
+        # Create leaf node with manuscripts
         logger.info("ciaa-annual-reports: %d PDFs scanned", len(manuscripts))
         return IndexNode(
             name="ciaa-annual-reports",
@@ -266,9 +269,11 @@ class IndexBuilder:
                     f" file_names must be a list"
                 )
 
+            # Build manuscript entry for each PDF file
             press_id = metadata.get("press_id", "?")
             files_added = 0
             for file_name in file_names:
+                # Validate file_name is a non-empty string
                 if not isinstance(file_name, str) or not file_name.strip():
                     raise ValueError(
                         f"ciaa-press-releases: invalid file_name"
@@ -301,8 +306,10 @@ class IndexBuilder:
         if not manuscripts:
             return None
 
+        # Sort by press_id if available
         manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0), reverse=True)
 
+        # Create leaf node with manuscripts
         logger.info(
             "ciaa-press-releases: %d manuscripts from %d release(s)",
             len(manuscripts),
@@ -395,6 +402,7 @@ class IndexBuilder:
             content = self._node_to_dict_for_file(node)
             pending.append((file_path, content))
 
+        # Recursively process children - depth doesn't matter
         for child in node.children:
             self._collect_write_jobs(child, indices_dir, pending)
 
@@ -409,22 +417,25 @@ class IndexBuilder:
             start_idx = page_num * self.page_size
             page_manuscripts = manuscripts[start_idx : start_idx + self.page_size]
 
-            filename = (
-                f"{base_filename}.json"
-                if page_num == 0
-                else f"{base_filename}.page-{page_num + 1}.json"
-            )
+            # Determine filename
+            if page_num == 0:
+                filename = f"{base_filename}.json"
+            else:
+                filename = f"{base_filename}.page-{page_num + 1}.json"
 
+            # Create page node
             page_node = IndexNode(
                 name=node.name, path=node.path, manuscripts=page_manuscripts
             )
 
+            # Add next link if not the last page, otherwise explicitly set to None
             if page_num < total_pages - 1:
                 next_filename = f"{base_filename}.page-{page_num + 2}.json"
                 page_node.next_url = f"{self.indices_base_url}/{next_filename}"
             else:
                 page_node.next_url = None
 
+            # Write page file
             file_path = indices_dir / filename
             content = self._node_to_dict_for_file(page_node)
             pending.append((file_path, content))
@@ -433,6 +444,7 @@ class IndexBuilder:
         """Generate filename for a node."""
         if node.name == "root":
             return "index.json"
+        # Convert path to filename: /court-orders/special/081 -> index.court-orders.special.081.json
         path_parts = [part for part in node.path.strip("/").split("/") if part]
         return f"index.{'.'.join(path_parts)}.json"
 
@@ -457,6 +469,7 @@ class IndexBuilder:
         if node.next_url is not None:
             result["next"] = node.next_url
         elif hasattr(node, "next_url"):
+            # Explicitly include "next": null for paginated nodes
             result["next"] = None
 
         return result
@@ -478,30 +491,32 @@ def main() -> None:
     base_url = get_base_url()
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    logger.info("NGM Index build starting")
-    logger.info("  files_store : %s", files_store)
-    logger.info("  base_url    : %s", base_url)
-    logger.info("  date        : %s", date_str)
-    logger.info("  page_size   : %d", DEFAULT_PAGE_SIZE)
-    logger.info("  write_workers: %d", _MAX_WRITE_WORKERS)
+    logger.info("Building index ....")
+    logger.info("Files store: %s", files_store)
+    logger.info("Base URL: %s", base_url)
+    logger.info("Date: %s", date_str)
 
     builder = IndexBuilder(files_store, base_url, date_str)
 
+    # Build tree
     root = builder.build_tree()
+    logger.info("Tree built successfully")
 
+    # Validate tree
     try:
         root.validate()
+        logger.info("Tree validation passed")
     except ValueError as e:
         logger.error("Tree validation failed: %s", e)
         raise SystemExit(1) from None
 
+    # Write files
     try:
         builder.write_index_files(root)
+        logger.info("Index build completed successfully")
     except (OSError, TypeError, RuntimeError) as e:
         logger.error("Failed to write index files: %s", e)
         raise SystemExit(1) from None
-
-    logger.info("NGM Index build completed")
 
 
 if __name__ == "__main__":
