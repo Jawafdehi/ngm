@@ -156,6 +156,43 @@ class IndexBuilder:
             name="kanun-patrika", path="/kanun-patrika", manuscripts=manuscripts
         )
 
+    def _process_annual_report_pdf(self, pdf_path, metadata_dir) -> Manuscript:
+        """Process a single annual report PDF and its metadata."""
+        file_id = pdf_path.stem
+        metadata_path = metadata_dir / f"{file_id}.json"
+
+        try:
+            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as e:
+            # Metadata is mandatory for annual reports — CiaaAnnualReportsPipeline
+            # always writes a metadata JSON alongside every PDF download.
+            # A missing metadata file means the scraper pipeline broke mid-run,
+            # not a timing/lag issue like press releases. Throw to fail loudly.
+            raise FileNotFoundError(
+                f"ciaa-annual-reports: metadata missing for {file_id}"
+                f" — scraper may not have written it"
+            ) from e
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"ciaa-annual-reports: malformed JSON in metadata {file_id}: {e}"
+            ) from e
+        except (OSError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"ciaa-annual-reports: failed to read metadata {file_id}: {e}"
+            ) from e
+
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"ciaa-annual-reports: metadata {file_id} is not a JSON object"
+                f" — got {type(raw).__name__}"
+            )
+
+        return Manuscript(
+            url=self._build_url(pdf_path),
+            file_name=pdf_path.name,
+            metadata=raw,
+        )
+
     def _build_ciaa_annual_reports_node(self) -> IndexNode | None:
         """Build CIAA annual reports node with manuscripts and metadata."""
         pdf_dir = self._build_folder_structure("ciaa", "annual-reports", "pdf")
@@ -166,56 +203,113 @@ class IndexBuilder:
         if not pdf_dir.exists():
             return None
 
+        pdf_paths = sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name)
+
+        logger.info(
+            "ciaa-annual-reports: processing %d PDFs in parallel...", len(pdf_paths)
+        )
+
         manuscripts = []
-        for pdf_path in sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name):
-            file_id = pdf_path.stem
-            metadata_path = metadata_dir / f"{file_id}.json"
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_path = {
+                executor.submit(
+                    self._process_annual_report_pdf, path, metadata_dir
+                ): path
+                for path in pdf_paths
+            }
 
-            try:
-                raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except FileNotFoundError as e:
-                # Metadata is mandatory for annual reports — CiaaAnnualReportsPipeline
-                # always writes a metadata JSON alongside every PDF download.
-                # A missing metadata file means the scraper pipeline broke mid-run,
-                # not a timing/lag issue like press releases. Throw to fail loudly.
-                raise FileNotFoundError(
-                    f"ciaa-annual-reports: metadata missing for {file_id}"
-                    f" — scraper may not have written it"
-                ) from e
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"ciaa-annual-reports: malformed JSON in metadata {file_id}: {e}"
-                ) from e
-            except (OSError, UnicodeDecodeError) as e:
-                raise RuntimeError(
-                    f"ciaa-annual-reports: failed to read metadata {file_id}: {e}"
-                ) from e
-
-            if not isinstance(raw, dict):
-                raise ValueError(
-                    f"ciaa-annual-reports: metadata {file_id} is not a JSON object"
-                    f" — got {type(raw).__name__}"
-                )
-
-            manuscripts.append(
-                Manuscript(
-                    url=self._build_url(pdf_path),
-                    file_name=pdf_path.name,
-                    metadata=raw,
-                )
-            )
-            logger.debug("ciaa-annual-reports: loaded %s", file_id)
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    manuscript = future.result()
+                    manuscripts.append(manuscript)
+                except Exception:
+                    logger.exception(
+                        "ciaa-annual-reports: failed to process %s", path.name
+                    )
+                    raise
 
         if not manuscripts:
             return None
 
-        # Create leaf node with manuscripts
+        # Sort by file_name for deterministic ordering
+        manuscripts.sort(key=lambda m: m.file_name)
+
         logger.info("ciaa-annual-reports: %d PDFs scanned", len(manuscripts))
+        # Create leaf node with manuscripts
         return IndexNode(
             name="ciaa-annual-reports",
             path="/ciaa-annual-reports",
             manuscripts=manuscripts,
         )
+
+    def _process_press_release_metadata(
+        self, metadata_path, files_dir
+    ) -> list[Manuscript]:
+        """Process a single press release metadata file and return manuscripts."""
+        # Metadata file itself failing → throw.
+        # File-based checkpointing means only new files appear each run,
+        # so a malformed new metadata file means the scraper pipeline broke.
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"ciaa-press-releases: metadata file disappeared mid-scan:"
+                f" {metadata_path.name}"
+            ) from e
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"ciaa-press-releases: malformed JSON in {metadata_path.name}: {e}"
+            ) from e
+        except (OSError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"ciaa-press-releases: failed to read {metadata_path.name}: {e}"
+            ) from e
+
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                f"ciaa-press-releases: {metadata_path.name} is not a JSON object"
+                f" — got {type(metadata).__name__}"
+            )
+
+        if "file_names" not in metadata:
+            raise ValueError(
+                f"ciaa-press-releases: {metadata_path.name} missing file_names"
+            )
+        file_names = metadata["file_names"]
+        if not isinstance(file_names, list):
+            raise ValueError(
+                f"ciaa-press-releases: {metadata_path.name}"
+                f" file_names must be a list"
+            )
+
+        # Build manuscript entry for each PDF file
+        manuscripts = []
+        for file_name in file_names:
+            # Validate file_name is a non-empty string
+            if not isinstance(file_name, str) or not file_name.strip():
+                raise ValueError(
+                    f"ciaa-press-releases: invalid file_name"
+                    f" in {metadata_path.name}: {file_name!r}"
+                )
+
+            # PDF not existing in R2 → warn only, do not throw.
+            # Metadata is the source of truth for press releases.
+            # The scraper writes metadata after the file download completes,
+            # but R2 upload and propagation are not atomic — the PDF may lag
+            # behind the metadata write. The URL is still valid to index;
+            # the user gets a 404 at download time, which is preferable
+            # to blocking the entire index build over one lagging file.
+            pdf_path = files_dir / file_name
+            manuscripts.append(
+                Manuscript(
+                    url=self._build_url(pdf_path),
+                    file_name=file_name,
+                    metadata=metadata,
+                )
+            )
+
+        return manuscripts
 
     def _build_ciaa_press_releases_node(self) -> IndexNode | None:
         """Build CIAA press releases node with manuscripts and metadata."""
@@ -227,98 +321,58 @@ class IndexBuilder:
         if not metadata_dir.exists():
             return None
 
-        manuscripts = []
-        releases_attempted = 0
+        metadata_paths = sorted(metadata_dir.glob("*.json"), key=lambda p: p.name)
 
-        for metadata_path in sorted(metadata_dir.glob("*.json"), key=lambda p: p.name):
-            releases_attempted += 1
+        logger.info(
+            "ciaa-press-releases: processing %d metadata files in parallel...",
+            len(metadata_paths),
+        )
 
-            # Metadata file itself failing → throw.
-            # File-based checkpointing means only new files appear each run,
-            # so a malformed new metadata file means the scraper pipeline broke.
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except FileNotFoundError as e:
-                raise FileNotFoundError(
-                    f"ciaa-press-releases: metadata file disappeared mid-scan:"
-                    f" {metadata_path.name}"
-                ) from e
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"ciaa-press-releases: malformed JSON in {metadata_path.name}: {e}"
-                ) from e
-            except (OSError, UnicodeDecodeError) as e:
-                raise RuntimeError(
-                    f"ciaa-press-releases: failed to read {metadata_path.name}: {e}"
-                ) from e
+        all_manuscripts = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_path = {
+                executor.submit(
+                    self._process_press_release_metadata, path, files_dir
+                ): path
+                for path in metadata_paths
+            }
 
-            if not isinstance(metadata, dict):
-                raise ValueError(
-                    f"ciaa-press-releases: {metadata_path.name} is not a JSON object"
-                    f" — got {type(metadata).__name__}"
-                )
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
 
-            if "file_names" not in metadata:
-                raise ValueError(
-                    f"ciaa-press-releases: {metadata_path.name} missing file_names"
-                )
-            file_names = metadata["file_names"]
-            if not isinstance(file_names, list):
-                raise ValueError(
-                    f"ciaa-press-releases: {metadata_path.name}"
-                    f" file_names must be a list"
-                )
-
-            # Build manuscript entry for each PDF file
-            press_id = metadata.get("press_id", "?")
-            files_added = 0
-            for file_name in file_names:
-                # Validate file_name is a non-empty string
-                if not isinstance(file_name, str) or not file_name.strip():
-                    raise ValueError(
-                        f"ciaa-press-releases: invalid file_name"
-                        f" in press_id={press_id}: {file_name!r}"
+                try:
+                    manuscripts = future.result()
+                    all_manuscripts.extend(manuscripts)
+                    completed += 1
+                    if completed % 100 == 0:
+                        logger.info(
+                            "ciaa-press-releases: processed %d/%d files",
+                            completed,
+                            len(metadata_paths),
+                        )
+                except Exception:
+                    logger.exception(
+                        "ciaa-press-releases: failed to process %s", path.name
                     )
+                    raise
 
-                # PDF not existing in R2 → warn only, do not throw.
-                # Metadata is the source of truth for press releases.
-                # The scraper writes metadata after the file download completes,
-                # but R2 upload and propagation are not atomic — the PDF may lag
-                # behind the metadata write. The URL is still valid to index;
-                # the user gets a 404 at download time, which is preferable
-                # to blocking the entire index build over one lagging file.
-                pdf_path = files_dir / file_name
-                manuscripts.append(
-                    Manuscript(
-                        url=self._build_url(pdf_path),
-                        file_name=file_name,
-                        metadata=metadata,
-                    )
-                )
-                files_added += 1
-
-            logger.debug(
-                "ciaa-press-releases: press_id=%s — %d file(s) added",
-                press_id,
-                files_added,
-            )
-
-        if not manuscripts:
+        if not all_manuscripts:
             return None
 
         # Sort by press_id if available
-        manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0), reverse=True)
+        all_manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0), reverse=True)
 
         # Create leaf node with manuscripts
         logger.info(
             "ciaa-press-releases: %d manuscripts from %d release(s)",
-            len(manuscripts),
-            releases_attempted,
+            len(all_manuscripts),
+            len(metadata_paths),
         )
         return IndexNode(
             name="ciaa-press-releases",
             path="/ciaa-press-releases",
-            manuscripts=manuscripts,
+            manuscripts=all_manuscripts,
         )
 
     def _count_manuscripts_in_tree(self, node: IndexNode) -> int:
