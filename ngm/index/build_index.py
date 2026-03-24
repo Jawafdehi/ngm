@@ -8,11 +8,13 @@ This module implements the new tree-based index system where:
 - Pagination is handled via 'next' links
 """
 
+import concurrent.futures
 import json
 import logging
 import os
 from datetime import datetime
 from typing import Any
+
 from cloudpathlib import AnyPath
 
 from .models import Manuscript, IndexNode
@@ -20,7 +22,8 @@ from .models import Manuscript, IndexNode
 logger = logging.getLogger(__name__)
 
 # Configuration
-DEFAULT_PAGE_SIZE = 30  # Number of manuscripts per index page
+DEFAULT_PAGE_SIZE = 100  # Number of manuscripts per index page
+_MAX_WRITE_WORKERS = 10  # Parallel S3 PUT workers
 
 
 class IndexBuilder:
@@ -75,31 +78,58 @@ class IndexBuilder:
         return f"{self.base_url}/{self._relative_path(file_path)}"
 
     def build_tree(self) -> IndexNode:
-        """Build the complete index tree with full data."""
+        """Build the complete index tree, running each source builder in parallel."""
         root = IndexNode(name="root", path="/")
 
-        # Build each top-level node with full data
-        nodes_to_add = []
-        total_manuscripts = 0
-
-        for builder_fn in (
+        builder_fns = (
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
             # TODO: Add court orders builder once _build_court_orders_node,
             # _build_court_type_node, and _build_court_year_leaf_node are implemented.
-        ):
-            node = builder_fn()
-            if node:
-                nodes_to_add.append(node)
-                count = self._count_manuscripts_in_tree(node)
-                total_manuscripts += count
-                logger.info("Indexed %d items for %s", count, node.name)
-            else:
-                logger.info("No data found for %s", builder_fn.__name__)
+        )
+
+        # Each builder scans S3 independently — run them concurrently.
+        # ThreadPoolExecutor is fine here: cloudpathlib S3 calls release the GIL.
+        results: dict[str, IndexNode | None] = {}
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(builder_fns)
+        ) as executor:
+            future_to_name = {executor.submit(fn): fn.__name__ for fn in builder_fns}
+            for future in concurrent.futures.as_completed(future_to_name):
+                fn_name = future_to_name[future]
+                try:
+                    node = future.result()
+                    results[fn_name] = node
+                    if node:
+                        count = self._count_manuscripts_in_tree(node)
+                        logger.info(
+                            "%s: indexed %d manuscripts",
+                            fn_name,
+                            count,
+                        )
+                    else:
+                        logger.info("%s: no data found", fn_name)
+                except Exception:
+                    logger.exception("%s: builder raised an exception", fn_name)
+                    raise
+
+        # Preserve deterministic source ordering regardless of completion order
+        # List comprehension already maintains builder_fns order
+        nodes_to_add = [
+            results[fn.__name__]
+            for fn in builder_fns
+            if results.get(fn.__name__) is not None
+        ]
 
         root.children = nodes_to_add
-        logger.info("Total manuscripts indexed: %d", total_manuscripts)
+        total = sum(self._count_manuscripts_in_tree(n) for n in nodes_to_add)
+        logger.info(
+            "Tree built — %d total manuscripts across %d sources",
+            total,
+            len(nodes_to_add),
+        )
         return root
 
     def _build_kanun_patrika_node(self) -> IndexNode | None:
@@ -116,11 +146,12 @@ class IndexBuilder:
                     url=self._build_url(pdf_path), file_name=pdf_path.name, metadata={}
                 )
             )
+            logger.debug("kanun-patrika: found %s", pdf_path.name)
 
         if not manuscripts:
             return None
 
-        # Create leaf node with manuscripts
+        logger.info("kanun-patrika: %d PDFs scanned", len(manuscripts))
         return IndexNode(
             name="kanun-patrika", path="/kanun-patrika", manuscripts=manuscripts
         )
@@ -137,39 +168,49 @@ class IndexBuilder:
 
         manuscripts = []
         for pdf_path in sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name):
-            # Load metadata if available
-            metadata = {}
             file_id = pdf_path.stem
             metadata_path = metadata_dir / f"{file_id}.json"
 
             try:
                 raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    logger.warning(
-                        "Skipping metadata %s: expected a JSON object", file_id
-                    )
-                else:
-                    metadata = raw
-            except FileNotFoundError:
-                # No metadata file for this PDF
-                pass
+            except FileNotFoundError as e:
+                # Metadata is mandatory for annual reports — CiaaAnnualReportsPipeline
+                # always writes a metadata JSON alongside every PDF download.
+                # A missing metadata file means the scraper pipeline broke mid-run,
+                # not a timing/lag issue like press releases. Throw to fail loudly.
+                raise FileNotFoundError(
+                    f"ciaa-annual-reports: metadata missing for {file_id}"
+                    f" — scraper may not have written it"
+                ) from e
             except json.JSONDecodeError as e:
-                logger.warning("Failed to parse JSON metadata for %s: %s", file_id, e)
+                raise ValueError(
+                    f"ciaa-annual-reports: malformed JSON in metadata {file_id}: {e}"
+                ) from e
             except (OSError, UnicodeDecodeError) as e:
-                logger.warning("Failed to read metadata file for %s: %s", file_id, e)
+                raise RuntimeError(
+                    f"ciaa-annual-reports: failed to read metadata {file_id}: {e}"
+                ) from e
+
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"ciaa-annual-reports: metadata {file_id} is not a JSON object"
+                    f" — got {type(raw).__name__}"
+                )
 
             manuscripts.append(
                 Manuscript(
                     url=self._build_url(pdf_path),
                     file_name=pdf_path.name,
-                    metadata=metadata,
+                    metadata=raw,
                 )
             )
+            logger.debug("ciaa-annual-reports: loaded %s", file_id)
 
         if not manuscripts:
             return None
 
         # Create leaf node with manuscripts
+        logger.info("ciaa-annual-reports: %d PDFs scanned", len(manuscripts))
         return IndexNode(
             name="ciaa-annual-reports",
             path="/ciaa-annual-reports",
@@ -187,46 +228,65 @@ class IndexBuilder:
             return None
 
         manuscripts = []
+        releases_attempted = 0
+
         for metadata_path in sorted(metadata_dir.glob("*.json"), key=lambda p: p.name):
+            releases_attempted += 1
+
+            # Metadata file itself failing → throw.
+            # File-based checkpointing means only new files appear each run,
+            # so a malformed new metadata file means the scraper pipeline broke.
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"ciaa-press-releases: metadata file disappeared mid-scan:"
+                    f" {metadata_path.name}"
+                ) from e
             except json.JSONDecodeError as e:
-                logger.warning(
-                    "Failed to parse JSON metadata %s: %s", metadata_path.name, e
-                )
-                continue
+                raise ValueError(
+                    f"ciaa-press-releases: malformed JSON in {metadata_path.name}: {e}"
+                ) from e
             except (OSError, UnicodeDecodeError) as e:
-                logger.warning(
-                    "Failed to read metadata file %s: %s", metadata_path.name, e
-                )
-                continue
+                raise RuntimeError(
+                    f"ciaa-press-releases: failed to read {metadata_path.name}: {e}"
+                ) from e
 
-            # Validation checks
             if not isinstance(metadata, dict):
-                logger.warning(
-                    "Skipping metadata %s: expected a JSON object", metadata_path.name
+                raise ValueError(
+                    f"ciaa-press-releases: {metadata_path.name} is not a JSON object"
+                    f" — got {type(metadata).__name__}"
                 )
-                continue
 
-            file_names = metadata.get("file_names", [])
-            if not isinstance(file_names, list):
-                logger.warning(
-                    "Skipping metadata %s: file_names must be a list",
-                    metadata_path.name,
+            if "file_names" not in metadata:
+                raise ValueError(
+                    f"ciaa-press-releases: {metadata_path.name} missing file_names"
                 )
-                continue
+            file_names = metadata["file_names"]
+            if not isinstance(file_names, list):
+                raise ValueError(
+                    f"ciaa-press-releases: {metadata_path.name}"
+                    f" file_names must be a list"
+                )
 
             # Build manuscript entry for each PDF file
+            press_id = metadata.get("press_id", "?")
+            files_added = 0
             for file_name in file_names:
                 # Validate file_name is a non-empty string
                 if not isinstance(file_name, str) or not file_name.strip():
-                    logger.warning(
-                        "Skipping invalid file_name in %s: %r",
-                        metadata_path.name,
-                        file_name,
+                    raise ValueError(
+                        f"ciaa-press-releases: invalid file_name"
+                        f" in press_id={press_id}: {file_name!r}"
                     )
-                    continue
 
+                # PDF not existing in R2 → warn only, do not throw.
+                # Metadata is the source of truth for press releases.
+                # The scraper writes metadata after the file download completes,
+                # but R2 upload and propagation are not atomic — the PDF may lag
+                # behind the metadata write. The URL is still valid to index;
+                # the user gets a 404 at download time, which is preferable
+                # to blocking the entire index build over one lagging file.
                 pdf_path = files_dir / file_name
                 manuscripts.append(
                     Manuscript(
@@ -235,14 +295,26 @@ class IndexBuilder:
                         metadata=metadata,
                     )
                 )
+                files_added += 1
+
+            logger.debug(
+                "ciaa-press-releases: press_id=%s — %d file(s) added",
+                press_id,
+                files_added,
+            )
 
         if not manuscripts:
             return None
 
         # Sort by press_id if available
-        manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0))
+        manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0), reverse=True)
 
         # Create leaf node with manuscripts
+        logger.info(
+            "ciaa-press-releases: %d manuscripts from %d release(s)",
+            len(manuscripts),
+            releases_attempted,
+        )
         return IndexNode(
             name="ciaa-press-releases",
             path="/ciaa-press-releases",
@@ -256,54 +328,88 @@ class IndexBuilder:
         )
 
     def write_index_files(self, root: IndexNode) -> None:
-        """Write all index files to storage."""
+        """Write all index files to storage using parallel S3 PUTs.
+
+        Collects all (path, content) pairs first (no I/O), then fires all
+        writes concurrently via a thread pool.
+        """
         indices_dir = self.root_path / "indices" / self.date_str
         indices_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Writing index files...")
+        logger.info("Collecting write jobs...")
+        pending: list[tuple] = []
+        self._collect_write_jobs(root, indices_dir, pending)
+        logger.info("  %d files to write (page_size=%d)", len(pending), self.page_size)
 
-        # Single-pass recursive walk - handles any tree depth
-        self._write_node(root, indices_dir)
+        logger.info("Writing index files (parallel, %d workers)...", _MAX_WRITE_WORKERS)
+        failed: list[str] = []
 
-        logger.info("Successfully wrote index files to %s", indices_dir)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_MAX_WRITE_WORKERS
+        ) as executor:
+            future_to_path = {
+                executor.submit(self._write_file, path, content): path
+                for path, content in pending
+            }
+            done = 0
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                done += 1
+                try:
+                    future.result()
+                    logger.debug("[%d/%d] wrote %s", done, len(pending), path)
+                except (OSError, TypeError) as e:
+                    logger.error("Failed to write %s: %s", path, e)
+                    failed.append(str(path))
 
-        # Copy root index to index-v2.json at root level
+        if failed:
+            logger.error(
+                "Write phase completed with %d failure(s): %s",
+                len(failed),
+                failed,
+            )
+            raise RuntimeError(f"{len(failed)} index file(s) failed to write: {failed}")
+
+        logger.info("Wrote %d index files", len(pending))
+
+        # Root-level alias — same content, one extra PUT
         root_index_path = self.root_path / "index-v2.json"
         root_content = self._node_to_dict_for_file(root)
         root_index_path.write_text(
             json.dumps(root_content, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        logger.info("Successfully wrote %s", root_index_path)
+        logger.info("Wrote root alias %s", root_index_path)
 
-    def _write_node(self, node: IndexNode, indices_dir) -> None:
-        """Single-pass recursive walk — handles any tree depth."""
+    def _write_file(self, path, content: dict) -> None:
+        """Write a single JSON file — called from thread pool."""
+        path.write_text(
+            json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def _collect_write_jobs(self, node: IndexNode, indices_dir, pending: list) -> None:
+        """Walk the tree and collect all (path, content) pairs without any I/O."""
         if len(node.manuscripts) > self.page_size:
-            # Handle pagination
             total_pages = (len(node.manuscripts) + self.page_size - 1) // self.page_size
             logger.info(
-                "Applying pagination to %s: %d manuscripts across %d pages",
+                "  pagination: %s → %d manuscripts across %d pages",
                 node.name,
                 len(node.manuscripts),
                 total_pages,
             )
-            self._write_paginated_node(node, indices_dir, total_pages)
+            self._collect_paginated_jobs(node, indices_dir, total_pages, pending)
         else:
-            # Write single file
             file_path = indices_dir / self._node_filename(node)
             content = self._node_to_dict_for_file(node)
-            file_path.write_text(
-                json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            logger.info("Successfully wrote %s", file_path)
+            pending.append((file_path, content))
 
         # Recursively process children - depth doesn't matter
         for child in node.children:
-            self._write_node(child, indices_dir)
+            self._collect_write_jobs(child, indices_dir, pending)
 
-    def _write_paginated_node(
-        self, node: IndexNode, indices_dir, total_pages: int
+    def _collect_paginated_jobs(
+        self, node: IndexNode, indices_dir, total_pages: int, pending: list
     ) -> None:
-        """Write paginated files for a node with many manuscripts."""
+        """Collect paginated write jobs without any I/O."""
         manuscripts = node.manuscripts
         base_filename = self._node_filename(node).removesuffix(".json")
 
@@ -332,16 +438,12 @@ class IndexBuilder:
             # Write page file
             file_path = indices_dir / filename
             content = self._node_to_dict_for_file(page_node)
-            file_path.write_text(
-                json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            logger.info("Successfully wrote %s", file_path)
+            pending.append((file_path, content))
 
     def _node_filename(self, node: IndexNode) -> str:
         """Generate filename for a node."""
         if node.name == "root":
             return "index.json"
-
         # Convert path to filename: /court-orders/special/081 -> index.court-orders.special.081.json
         path_parts = [part for part in node.path.strip("/").split("/") if part]
         return f"index.{'.'.join(path_parts)}.json"
@@ -353,7 +455,7 @@ class IndexBuilder:
 
     def _node_to_dict_for_file(self, node: IndexNode) -> dict[str, Any]:
         """Children serialized as $ref stubs; full data is in each child's own file."""
-        result = {"name": node.name, "path": node.path}
+        result: dict[str, Any] = {"name": node.name, "path": node.path}
 
         if node.children:
             result["children"] = [
@@ -389,7 +491,7 @@ def main() -> None:
     base_url = get_base_url()
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    logger.info("Building index v2.0...")
+    logger.info("Building index ....")
     logger.info("Files store: %s", files_store)
     logger.info("Base URL: %s", base_url)
     logger.info("Date: %s", date_str)
@@ -411,8 +513,8 @@ def main() -> None:
     # Write files
     try:
         builder.write_index_files(root)
-        logger.info("Index v2.0 build completed successfully")
-    except (OSError, TypeError) as e:
+        logger.info("Index build completed successfully")
+    except (OSError, TypeError, RuntimeError) as e:
         logger.error("Failed to write index files: %s", e)
         raise SystemExit(1) from None
 
@@ -421,5 +523,9 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
 
     load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     main()
