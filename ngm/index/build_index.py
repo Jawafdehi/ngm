@@ -50,7 +50,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path / "uploads"
+        p = self.root_path
         for part in parts:
             p = p / part
         return p
@@ -85,8 +85,7 @@ class IndexBuilder:
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
-            # TODO: Add court orders builder once _build_court_orders_node,
-            # _build_court_type_node, and _build_court_year_leaf_node are implemented.
+            self._build_court_orders_node,
         )
 
         # Each builder scans S3 independently — run them concurrently.
@@ -373,6 +372,115 @@ class IndexBuilder:
             name="ciaa-press-releases",
             path="/ciaa-press-releases",
             manuscripts=all_manuscripts,
+        )
+
+    def _build_court_orders_node(self) -> IndexNode | None:
+        """Build court-orders branch node with supreme and special children."""
+        court_orders_dir = self._build_folder_structure("court-orders")
+
+        if not court_orders_dir.exists():
+            return None
+
+        # Build children for each court type
+        children = []
+
+        supreme_node = self._build_court_type_node("supreme")
+        if supreme_node:
+            children.append(supreme_node)
+
+        special_node = self._build_court_type_node("special")
+        if special_node:
+            children.append(special_node)
+
+        if not children:
+            return None
+
+        logger.info("court-orders: built with %d court type(s)", len(children))
+        return IndexNode(name="court-orders", path="/court-orders", children=children)
+
+    def _build_court_type_node(self, court_type: str) -> IndexNode | None:
+        """Build branch node for a specific court type (supreme or special)."""
+        court_dir = self._build_folder_structure("court-orders", court_type)
+
+        if not court_dir.exists():
+            return None
+
+        # Group files by year (extracted from filename pattern: YYY-...)
+        year_groups: dict[str, list] = {}
+
+        for file_path in sorted(court_dir.iterdir(), key=lambda p: p.name):
+            if not file_path.is_file():
+                continue
+
+            # Extract year from filename (e.g., "082-OA-0503.1.docx" -> "082")
+            filename = file_path.name
+            year_match = filename.split("-")[0] if "-" in filename else None
+
+            if year_match and year_match.isdigit() and len(year_match) == 3:
+                year = year_match
+                if year not in year_groups:
+                    year_groups[year] = []
+                year_groups[year].append(file_path)
+            else:
+                logger.debug(
+                    "court-orders/%s: skipping file with invalid year pattern: %s",
+                    court_type,
+                    filename,
+                )
+
+        if not year_groups:
+            return None
+
+        # Create child nodes for each year
+        children = []
+        for year in sorted(year_groups.keys()):
+            year_node = self._build_court_year_leaf_node(
+                court_type, year, year_groups[year]
+            )
+            if year_node:
+                children.append(year_node)
+
+        if not children:
+            return None
+
+        logger.info("court-orders/%s: built with %d year(s)", court_type, len(children))
+        return IndexNode(
+            name=court_type,
+            path=f"/court-orders/{court_type}",
+            children=children,
+        )
+
+    def _build_court_year_leaf_node(
+        self, court_type: str, year: str, file_paths: list
+    ) -> IndexNode | None:
+        """Build leaf node for a specific year with manuscripts."""
+        manuscripts = []
+
+        for file_path in file_paths:
+            manuscripts.append(
+                Manuscript(
+                    url=self._build_url(file_path),
+                    file_name=file_path.name,
+                    metadata={},
+                )
+            )
+            logger.debug(
+                "court-orders/%s/%s: found %s", court_type, year, file_path.name
+            )
+
+        if not manuscripts:
+            return None
+
+        logger.info(
+            "court-orders/%s/%s: %d documents scanned",
+            court_type,
+            year,
+            len(manuscripts),
+        )
+        return IndexNode(
+            name=year,
+            path=f"/court-orders/{court_type}/{year}",
+            manuscripts=manuscripts,
         )
 
     def _count_manuscripts_in_tree(self, node: IndexNode) -> int:
