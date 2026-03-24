@@ -340,17 +340,17 @@ class IndexBuilder:
             completed = 0
             for future in concurrent.futures.as_completed(future_to_path):
                 path = future_to_path[future]
-                completed += 1
-                if completed % 100 == 0:
-                    logger.info(
-                        "ciaa-press-releases: processed %d/%d files",
-                        completed,
-                        len(metadata_paths),
-                    )
 
                 try:
                     manuscripts = future.result()
                     all_manuscripts.extend(manuscripts)
+                    completed += 1
+                    if completed % 100 == 0:
+                        logger.info(
+                            "ciaa-press-releases: processed %d/%d files",
+                            completed,
+                            len(metadata_paths),
+                        )
                 except Exception:
                     logger.exception(
                         "ciaa-press-releases: failed to process %s", path.name
