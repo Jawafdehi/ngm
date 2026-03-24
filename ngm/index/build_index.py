@@ -50,7 +50,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path
+        p = self.root_path / "uploads"
         for part in parts:
             p = p / part
         return p
@@ -431,17 +431,42 @@ class IndexBuilder:
         if not year_groups:
             return None
 
-        # Create child nodes for each year
+        logger.info(
+            "court-orders/%s: processing %d year(s) in parallel...",
+            court_type,
+            len(year_groups),
+        )
+
+        # Create child nodes for each year in parallel
         children = []
-        for year in sorted(year_groups.keys()):
-            year_node = self._build_court_year_leaf_node(
-                court_type, year, year_groups[year]
-            )
-            if year_node:
-                children.append(year_node)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_year = {
+                executor.submit(
+                    self._build_court_year_leaf_node,
+                    court_type,
+                    year,
+                    year_groups[year],
+                ): year
+                for year in sorted(year_groups.keys())
+            }
+
+            for future in concurrent.futures.as_completed(future_to_year):
+                year = future_to_year[future]
+                try:
+                    year_node = future.result()
+                    if year_node:
+                        children.append(year_node)
+                except Exception:
+                    logger.exception(
+                        "court-orders/%s: failed to process year %s", court_type, year
+                    )
+                    raise
 
         if not children:
             return None
+
+        # Sort children by year for deterministic ordering
+        children.sort(key=lambda n: n.name)
 
         logger.info("court-orders/%s: built with %d year(s)", court_type, len(children))
         return IndexNode(
