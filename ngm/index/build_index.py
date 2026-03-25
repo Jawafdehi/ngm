@@ -383,17 +383,20 @@ class IndexBuilder:
 
         # Build children for each court type
         children = []
+        for court_path in sorted(court_orders_dir.iterdir()):
+            if not court_path.is_dir():
+                continue
 
-        supreme_node = self._build_court_type_node("supreme")
-        if supreme_node:
-            children.append(supreme_node)
-
-        special_node = self._build_court_type_node("special")
-        if special_node:
-            children.append(special_node)
+            court_identifier = court_path.name
+            court_node = self._build_court_type_node(court_identifier)
+            if court_node:
+                children.append(court_node)
 
         if not children:
             return None
+
+        # Sort children by court type for deterministic ordering
+        children.sort(key=lambda n: n.name)
 
         logger.info("court-orders: built with %d court type(s)", len(children))
         return IndexNode(name="court-orders", path="/court-orders", children=children)
@@ -406,11 +409,16 @@ class IndexBuilder:
             return None
 
         # Group files by year (extracted from filename pattern: YYY-...)
+        # Process in batches to avoid loading millions of filenames in memory
         year_groups: dict[str, list] = {}
+        batch_size = 10000  # Process 10k files at a time
+        file_count = 0
 
-        for file_path in sorted(court_dir.iterdir(), key=lambda p: p.name):
+        for file_path in court_dir.iterdir():
             if not file_path.is_file():
                 continue
+
+            file_count += 1
 
             # Extract year from filename (e.g., "082-OA-0503.1.docx" -> "082")
             filename = file_path.name
@@ -422,10 +430,17 @@ class IndexBuilder:
                     year_groups[year] = []
                 year_groups[year].append(file_path)
             else:
-                logger.debug(
-                    "court-orders/%s: skipping file with invalid year pattern: %s",
+                raise ValueError(
+                    f"court-orders/{court_type}: invalid filename pattern '{filename}' "
+                    f"— expected format: YYY-..., where YYY is a 3-digit year"
+                )
+
+            # Process batch when limit reached
+            if file_count % batch_size == 0:
+                logger.info(
+                    "court-orders/%s: processed %d files so far...",
                     court_type,
-                    filename,
+                    file_count,
                 )
 
         if not year_groups:
@@ -440,25 +455,30 @@ class IndexBuilder:
         # Create child nodes for each year in parallel
         children = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_year = {
+            futures = {
                 executor.submit(
-                    self._build_court_year_leaf_node,
+                    self._build_court_year_branch_node,
                     court_type,
                     year,
                     year_groups[year],
-                ): year
+                ): (
+                    court_type,
+                    year,
+                )  # Store context as tuple
                 for year in sorted(year_groups.keys())
             }
 
-            for future in concurrent.futures.as_completed(future_to_year):
-                year = future_to_year[future]
+            for future in concurrent.futures.as_completed(futures):
+                court_type_ctx, year_ctx = futures[future]
                 try:
                     year_node = future.result()
                     if year_node:
                         children.append(year_node)
                 except Exception:
                     logger.exception(
-                        "court-orders/%s: failed to process year %s", court_type, year
+                        "court-orders/%s: failed to process year %s",
+                        court_type_ctx,
+                        year_ctx,
                     )
                     raise
 
@@ -475,10 +495,99 @@ class IndexBuilder:
             children=children,
         )
 
-    def _build_court_year_leaf_node(
+    def _build_court_year_branch_node(
         self, court_type: str, year: str, file_paths: list
     ) -> IndexNode | None:
-        """Build leaf node for a specific year with manuscripts."""
+        """Build branch node for a specific year, grouping by case number."""
+        # Group files by case number (e.g., "082-OA-0503.1.docx" -> "082-OA-0503")
+        case_groups: dict[str, list] = {}
+
+        for file_path in file_paths:
+            filename = file_path.name
+            # Extract case number: remove file extension and any trailing version numbers
+            # e.g., "082-OA-0503.1.docx" -> "082-OA-0503"
+            name_without_ext = (
+                filename.rsplit(".", 1)[0] if "." in filename else filename
+            )
+            # Remove trailing version numbers like ".1", ".2", etc.
+            case_number = (
+                name_without_ext.rsplit(".", 1)[0]
+                if "." in name_without_ext
+                else name_without_ext
+            )
+
+            if case_number not in case_groups:
+                case_groups[case_number] = []
+            case_groups[case_number].append(file_path)
+
+        if not case_groups:
+            return None
+
+        # Only log for large years to avoid spam
+        if len(case_groups) > 1000:
+            logger.info(
+                "court-orders/%s/%s: processing %d case(s) in parallel...",
+                court_type,
+                year,
+                len(case_groups),
+            )
+
+        # Create child nodes for each case number in parallel
+        children = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(
+                    self._build_court_case_leaf_node,
+                    court_type,
+                    year,
+                    case_number,
+                    case_groups[case_number],
+                ): (
+                    court_type,
+                    year,
+                    case_number,
+                )  # Store context as tuple
+                for case_number in sorted(case_groups.keys())
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                court_type_ctx, year_ctx, case_number_ctx = futures[future]
+                try:
+                    case_node = future.result()
+                    if case_node:
+                        children.append(case_node)
+                except Exception:
+                    logger.exception(
+                        "court-orders/%s/%s: failed to process case %s",
+                        court_type_ctx,
+                        year_ctx,
+                        case_number_ctx,
+                    )
+                    raise
+
+        if not children:
+            return None
+
+        # Sort children by case number for deterministic ordering
+        children.sort(key=lambda n: n.name)
+
+        # Summary log instead of per-case logging
+        logger.info(
+            "court-orders/%s/%s: built %d case(s)",
+            court_type,
+            year,
+            len(children),
+        )
+        return IndexNode(
+            name=year,
+            path=f"/court-orders/{court_type}/{year}",
+            children=children,
+        )
+
+    def _build_court_case_leaf_node(
+        self, court_type: str, year: str, case_number: str, file_paths: list
+    ) -> IndexNode | None:
+        """Build leaf node for a specific case with manuscripts."""
         manuscripts = []
 
         for file_path in file_paths:
@@ -489,22 +598,15 @@ class IndexBuilder:
                     metadata={},
                 )
             )
-            logger.debug(
-                "court-orders/%s/%s: found %s", court_type, year, file_path.name
-            )
+            # Debug logging removed to avoid 1.5M+ log lines
 
         if not manuscripts:
             return None
 
-        logger.info(
-            "court-orders/%s/%s: %d documents scanned",
-            court_type,
-            year,
-            len(manuscripts),
-        )
+        # No per-case logging - summary logged at year level
         return IndexNode(
-            name=year,
-            path=f"/court-orders/{court_type}/{year}",
+            name=case_number,
+            path=f"/court-orders/{court_type}/{year}/{case_number}",
             manuscripts=manuscripts,
         )
 
@@ -575,6 +677,7 @@ class IndexBuilder:
 
     def _collect_write_jobs(self, node: IndexNode, indices_dir, pending: list) -> None:
         """Walk the tree and collect all (path, content) pairs without any I/O."""
+        # Check if node needs pagination (either manuscripts or children)
         if len(node.manuscripts) > self.page_size:
             total_pages = (len(node.manuscripts) + self.page_size - 1) // self.page_size
             logger.info(
@@ -583,7 +686,20 @@ class IndexBuilder:
                 len(node.manuscripts),
                 total_pages,
             )
-            self._collect_paginated_jobs(node, indices_dir, total_pages, pending)
+            self._collect_paginated_manuscripts_jobs(
+                node, indices_dir, total_pages, pending
+            )
+        elif len(node.children) > self.page_size:
+            total_pages = (len(node.children) + self.page_size - 1) // self.page_size
+            logger.info(
+                "  pagination: %s → %d children across %d pages",
+                node.name,
+                len(node.children),
+                total_pages,
+            )
+            self._collect_paginated_children_jobs(
+                node, indices_dir, total_pages, pending
+            )
         else:
             file_path = indices_dir / self._node_filename(node)
             content = self._node_to_dict_for_file(node)
@@ -593,10 +709,10 @@ class IndexBuilder:
         for child in node.children:
             self._collect_write_jobs(child, indices_dir, pending)
 
-    def _collect_paginated_jobs(
+    def _collect_paginated_manuscripts_jobs(
         self, node: IndexNode, indices_dir, total_pages: int, pending: list
     ) -> None:
-        """Collect paginated write jobs without any I/O."""
+        """Collect paginated write jobs for nodes with many manuscripts."""
         manuscripts = node.manuscripts
         base_filename = self._node_filename(node).removesuffix(".json")
 
@@ -613,6 +729,40 @@ class IndexBuilder:
             # Create page node
             page_node = IndexNode(
                 name=node.name, path=node.path, manuscripts=page_manuscripts
+            )
+
+            # Add next link if not the last page, otherwise explicitly set to None
+            if page_num < total_pages - 1:
+                next_filename = f"{base_filename}.page-{page_num + 2}.json"
+                page_node.next_url = f"{self.indices_base_url}/{next_filename}"
+            else:
+                page_node.next_url = None
+
+            # Write page file
+            file_path = indices_dir / filename
+            content = self._node_to_dict_for_file(page_node)
+            pending.append((file_path, content))
+
+    def _collect_paginated_children_jobs(
+        self, node: IndexNode, indices_dir, total_pages: int, pending: list
+    ) -> None:
+        """Collect paginated write jobs for nodes with many children."""
+        children = node.children
+        base_filename = self._node_filename(node).removesuffix(".json")
+
+        for page_num in range(total_pages):
+            start_idx = page_num * self.page_size
+            page_children = children[start_idx : start_idx + self.page_size]
+
+            # Determine filename
+            if page_num == 0:
+                filename = f"{base_filename}.json"
+            else:
+                filename = f"{base_filename}.page-{page_num + 1}.json"
+
+            # Create page node
+            page_node = IndexNode(
+                name=node.name, path=node.path, children=page_children
             )
 
             # Add next link if not the last page, otherwise explicitly set to None
