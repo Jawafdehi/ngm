@@ -409,9 +409,9 @@ class IndexBuilder:
             return None
 
         # Group files by year (extracted from filename pattern: YYY-...)
-        # Process in batches to avoid loading millions of filenames in memory
+        # Log progress every log_interval files for visibility on large directories
         year_groups: dict[str, list] = {}
-        batch_size = 10000  # Process 10k files at a time
+        log_interval = 10000  # Log progress every 10k files
         file_count = 0
 
         for file_path in court_dir.iterdir():
@@ -435,8 +435,8 @@ class IndexBuilder:
                     f"— expected format: YYY-..., where YYY is a 3-digit year"
                 )
 
-            # Process batch when limit reached
-            if file_count % batch_size == 0:
+            # Log progress when interval reached
+            if file_count % log_interval == 0:
                 logger.info(
                     "court-orders/%s: processed %d files so far...",
                     court_type,
