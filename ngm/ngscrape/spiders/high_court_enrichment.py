@@ -146,6 +146,26 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             f"{len(hearings)} hearings"
         )
 
+        # If no entities extracted, add raw वादीहरु/प्रतिवादीहरु to extra_data as fallback
+        if len(entities["plaintiffs"]) == 0 and len(entities["defendants"]) == 0:
+            self.logger.warning(
+                f"No entities extracted for {case_number}, adding raw data to extra_fields"
+            )
+            # Re-extract raw वादीहरु/प्रतिवादीहरु from soup
+            rows = soup.find_all("div", class_="row")
+            for row in rows:
+                cols = row.find_all("div", class_="col-xs-6")
+                if len(cols) == 2:
+                    label_elem = cols[0].find("strong")
+                    value_elem = cols[1].find("p")
+                    if label_elem and value_elem:
+                        label = normalize_whitespace(label_elem.get_text())
+                        value = normalize_whitespace(value_elem.get_text())
+                        if "वादी" in label and "प्रतिवादी" not in label and value:
+                            enrichment_result["extra_data"]["वादीहरु"] = value
+                        elif "प्रतिवादी" in label and value:
+                            enrichment_result["extra_data"]["प्रतिवादीहरु"] = value
+
         # Only mark as failed if we got absolutely nothing
         has_data = (
             enrichment_result["core_fields"]
@@ -205,6 +225,10 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             if not value or value == "--":
                 continue
 
+            # Skip वादीहरु and प्रतिवादीहरु - already extracted as entities
+            if "वादी" in label or "प्रतिवादी" in label:
+                continue
+
             # Core database fields
             if label == "दर्ता नँ":
                 core_fields["registration_number"] = value[:100]
@@ -258,29 +282,114 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
 
     def _extract_entities(self, soup: BeautifulSoup) -> Dict[str, List[Dict]]:
         entities = {"plaintiffs": [], "defendants": []}
-        rows = soup.find_all("div", class_="row")
 
-        for row in rows:
-            cols = row.find_all("div", class_="col-xs-6")
-            if len(cols) != 2:
-                continue
+        # Try Format 1: Panel-based structure (with separate panels and address columns)
+        plaintiff_panel = None
+        for panel in soup.find_all("div", class_="panel-heading"):
+            if "वादीको विवरण" in panel.get_text():
+                plaintiff_panel = panel
+                break
 
-            label_elem = cols[0].find("strong")
-            value_elem = cols[1].find("p")
+        if plaintiff_panel:
+            plaintiff_body = plaintiff_panel.find_next("div", class_="panel-body")
 
-            if not label_elem or not value_elem:
-                continue
+            if plaintiff_body:
+                rows = plaintiff_body.find_all("div", class_="row")
+                # Skip header row (first row with "नाम" and "ठेगाना")
+                for row in rows[1:]:
+                    cols = row.find_all("div", recursive=False)
+                    if len(cols) >= 2:
+                        name = normalize_whitespace(cols[0].get_text())
+                        address = (
+                            normalize_whitespace(cols[1].get_text())
+                            if len(cols) > 1
+                            else None
+                        )
 
-            label = normalize_whitespace(label_elem.get_text())
-            value = normalize_whitespace(value_elem.get_text())
+                        if name and name != "नाम":
+                            if address and address.strip():
+                                address = address[:500]
+                            else:
+                                address = None
+                            entities["plaintiffs"].append(
+                                {"name": name[:500], "address": address}
+                            )
 
-            if not value or value == "--":
-                continue
+            # Find defendant panel
+            defendant_panel = None
+            for panel in soup.find_all("div", class_="panel-heading"):
+                if "प्रतिवादीहरु" in panel.get_text():
+                    defendant_panel = panel
+                    break
 
-            if "वादी" in label and "प्रतिवादी" not in label:
-                entities["plaintiffs"].append({"name": value[:500], "address": None})
-            elif "प्रतिवादी" in label:
-                entities["defendants"].append({"name": value[:500], "address": None})
+            if defendant_panel:
+                defendant_body = defendant_panel.find_next("div", class_="panel-body")
+
+                if defendant_body:
+                    rows = defendant_body.find_all("div", class_="row")
+                    for row in rows[1:]:
+                        cols = row.find_all("div", recursive=False)
+                        if len(cols) >= 2:
+                            name = normalize_whitespace(cols[0].get_text())
+                            address = (
+                                normalize_whitespace(cols[1].get_text())
+                                if len(cols) > 1
+                                else None
+                            )
+
+                            if name and name != "नाम":
+                                if address and address.strip():
+                                    address = address[:500]
+                                else:
+                                    address = None
+                                entities["defendants"].append(
+                                    {"name": name[:500], "address": address}
+                                )
+
+        else:
+            # Format 2: Simple row-based structure (वादीहरु/प्रतिवादीहरु in col-xs-6 rows)
+            rows = soup.find_all("div", class_="row")
+
+            for row in rows:
+                cols = row.find_all("div", class_="col-xs-6")
+                if len(cols) != 2:
+                    continue
+
+                label_elem = cols[0].find("strong")
+                value_elem = cols[1].find("p")
+
+                if not label_elem or not value_elem:
+                    continue
+
+                label = normalize_whitespace(label_elem.get_text())
+                value = normalize_whitespace(value_elem.get_text())
+
+                if not value or value == "--":
+                    continue
+
+                if "वादी" in label and "प्रतिवादी" not in label:
+                    # Split plaintiffs by comma or slash
+                    if "," in value:
+                        plaintiff_names = [name.strip() for name in value.split(",")]
+                    else:
+                        plaintiff_names = [name.strip() for name in value.split("/")]
+                    for name in plaintiff_names:
+                        if name:
+                            entities["plaintiffs"].append(
+                                {"name": name[:500], "address": None}
+                            )
+
+                elif "प्रतिवादी" in label:
+                    # Split defendants by comma or slash
+                    if "," in value:
+                        defendant_names = [name.strip() for name in value.split(",")]
+                    else:
+                        defendant_names = [name.strip() for name in value.split("/")]
+                    for name in defendant_names:
+                        if name:
+                            entities["defendants"].append(
+                                {"name": name[:500], "address": None}
+                            )
 
         return entities
 
