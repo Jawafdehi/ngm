@@ -9,7 +9,7 @@ Courts: Special (priority 1) → Supreme (priority 2)
 Rate limiting
 ─────────────
 The spider processes ~600 cases/hour by default in prod/GitHub Actions.
-Each GitHub Actions job runs up to 6 hours (~3600 cases/job). The workflow
+Each GitHub Actions job runs up to 6 hours (~3000 cases/job with 1-hour buffer). The workflow
 re-triggers every 8 hours so there is continuous coverage.
 
 Override the rate locally:
@@ -43,12 +43,14 @@ HOMEPAGE_URL = "https://supremecourt.gov.np/cp/"
 
 # Default cases to process per run.
 # Each case requires ~2 HTTP requests (homepage GET + form POST).
-# To get 600 cases/hour: 600 cases × 2 requests = 1200 requests/hour → 3s per request.
-# Each GH Actions job runs ~6 hours → 600 cases/hour × 6 hours = 3600 cases/job.
-DEFAULT_CASES_PER_RUN = 3600
+# To get 600 cases/hour: 600 cases x 2 requests = 1200 requests/hour -> 3s per request.
+# Each GH Actions job runs ~6 hours -> 600 cases/hour x 5 hours = 3000 cases/job.
+# Set to 3000 (not 3600) to provide ~1 hour buffer for DB overhead, CAPTCHA retries,
+# HTTP retries, homepage GETs, and redirects to avoid GH Actions 6-hour timeout.
+DEFAULT_CASES_PER_RUN = 3000
 
 # Seconds between requests to achieve ~600 cases/hour.
-# 3s delay × 2 requests per case = 6s per case = 600 cases/hour.
+# 3s delay x 2 requests per case = 6s per case = 600 cases/hour.
 PROD_DOWNLOAD_DELAY = 3
 
 USER_AGENTS = [
