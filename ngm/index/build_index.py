@@ -50,7 +50,7 @@ class IndexBuilder:
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
-        p = self.root_path / "uploads"
+        p = self.root_path
         for part in parts:
             p = p / part
         return p
@@ -420,20 +420,41 @@ class IndexBuilder:
 
             file_count += 1
 
-            # Extract year from filename (e.g., "082-OA-0503.1.docx" -> "082")
+            # Extract year from filename
+            # Pattern 1 (majority case): YYY-TYPE-NNNN.X.ext → year is first part (082-OA-0503.1.docx → 082)
+            # Pattern 2 : XX-YYY-NNNN.X.ext → year is second part (93-068-0190.1.doc → 068)
             filename = file_path.name
-            year_match = filename.split("-")[0] if "-" in filename else None
+            parts = filename.split("-")
 
-            if year_match and year_match.isdigit() and len(year_match) == 3:
-                year = year_match
-                if year not in year_groups:
-                    year_groups[year] = []
-                year_groups[year].append(file_path)
+            if len(parts) < 2:
+                raise ValueError(
+                    f"court-orders/{court_type}: invalid filename pattern '{filename}' "
+                    f"— expected format: YYY-... or YY-YYY-..."
+                )
+
+            first_part = parts[0]
+
+            # Determine which part contains the year
+            if first_part.isdigit() and len(first_part) == 2:
+                # 2-digit first part → check if second part is a 3-digit year
+                if len(parts) >= 3 and parts[1].isdigit() and len(parts[1]) == 3:
+                    # Pattern: YY-YYY-NNNN (93-068-0190 → use 068)
+                    year = parts[1]
+                else:
+                    # Pattern: YY-NNNN (74-0020_ → pad to 074)
+                    year = first_part.zfill(3)
+            elif first_part.isdigit() and len(first_part) == 3:
+                # 3-digit first part → year is in first part (082-OA-0503 → use 082)
+                year = first_part
             else:
                 raise ValueError(
                     f"court-orders/{court_type}: invalid filename pattern '{filename}' "
-                    f"— expected format: YYY-..., where YYY is a 3-digit year"
+                    f"— expected format: YYY-... or YY-YYY-..., where YYY is a 3-digit year"
                 )
+
+            if year not in year_groups:
+                year_groups[year] = []
+            year_groups[year].append(file_path)
 
             # Log progress when interval reached
             if file_count % log_interval == 0:
