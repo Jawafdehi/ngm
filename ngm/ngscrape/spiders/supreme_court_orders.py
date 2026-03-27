@@ -222,16 +222,66 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
         )
 
-        court_priority = sql_case(
-            (CourtCase.court_identifier == "special", 1),
-            (CourtCase.court_identifier == "supreme", 2),
+        # Priority: Special/CR → Supreme/WH → Supreme/WF → Supreme/WO → Special/Other → Supreme/Other → Special/OA (last)
+        case_type_priority = sql_case(
+            # Priority 1: Special/CR
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    CourtCase.case_number.op("~")(r"^\d+-CR-"),
+                ),
+                1,
+            ),
+            # Priority 2: Supreme/WH
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WH-"),
+                ),
+                2,
+            ),
+            # Priority 3: Supreme/WF
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WF-"),
+                ),
+                3,
+            ),
+            # Priority 4: Supreme/WO
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WO-"),
+                ),
+                4,
+            ),
+            # Priority 5: Special/Other (non-OA, CR already matched above)
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    ~CourtCase.case_number.op("~")(r"^\d+-OA-"),
+                ),
+                5,
+            ),
+            # Priority 6: Supreme/Other
+            (CourtCase.court_identifier == "supreme", 6),
+            # Priority 7: Special/OA (0% success - lowest priority)
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    CourtCase.case_number.op("~")(r"^\d+-OA-"),
+                ),
+                7,
+            ),
             else_=99,
         )
 
         with self.session.begin():
             cases = (
                 query.order_by(
-                    court_priority, CourtCase.registration_date_ad.desc().nullslast()
+                    case_type_priority,
+                    CourtCase.registration_date_ad.desc().nullslast(),
                 )
                 .limit(self.limit)
                 .all()
@@ -333,8 +383,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         case_number = case_data["case_number"]
         processed = self.total_cases - len(self._pending_cases)
 
+        # Extract case type from case number (e.g., "082-CR-0051" -> "CR")
+        case_type_match = re.match(r"^\d+-([A-Z]+)-", case_number)
+        case_type = case_type_match.group(1) if case_type_match else "Unknown"
+
         self.logger.info(
-            f"[{processed}/{self.total_cases}] Processing case {case_number} "
+            f"[{processed}/{self.total_cases}] Scraping {case_type} case {case_number} "
             f"(court={case_data['court_identifier']})"
         )
 
@@ -589,9 +643,28 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             return
 
         if "रेकर्ड भेटिएन" in response.text:
-            self.logger.warning(
-                f"[{case_number}] No records found. Will retry next run."
+            # Check if case is too recent before marking as failed
+            is_old_enough = self._is_case_old_enough(
+                response.meta.get("last_hearing_date"), case_number
             )
+            error = "no_records_old_case" if is_old_enough else "too_recent"
+
+            if is_old_enough:
+                self.logger.warning(
+                    f"[{case_number}] No records found (old case) — marking as permanent failure."
+                )
+            else:
+                self.logger.info(
+                    f"[{case_number}] No records found (recent case) — will recheck in {TOO_RECENT_RECHECK_DAYS} days."
+                )
+
+            # Yield to pipeline to mark in database
+            yield {
+                "file_urls": [],
+                "case_number": case_number,
+                "court_identifier": court_identifier,
+                "error": error,
+            }
             yield from self._next_request()
             return
 
