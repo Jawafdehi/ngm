@@ -4,7 +4,7 @@ Supreme Court Orders Spider
 Scrapes order documents for Special and Supreme Court cases via a CAPTCHA-protected
 search form. Yields items to SupremeCourtOrdersPipeline for download and DB update.
 
-Courts: Special (priority 1) → Supreme (priority 2)
+Priority based on court order document availability: Special/CR → Supreme/WH → Supreme/WF → Supreme/WO → Special/Other → Supreme/Other → Special/OA
 
 Rate limiting
 ─────────────
@@ -153,23 +153,44 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         return None, None
 
-    def _is_case_old_enough(self, last_hearing_date, case_number):
-        """Return True if last hearing was >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY days ago."""
-        if not last_hearing_date:
-            self.logger.warning(
-                f"[{case_number}] No hearing data — treating as too recent (soft-skip)"
+    def _is_case_old_enough(
+        self, last_hearing_date, case_number, registration_date_ad=None
+    ):
+        """
+        Return True if case is old enough for documents to be available.
+
+        Checks last hearing date first, falls back to registration date if no hearings exist.
+        """
+        # Try last hearing date first
+        if last_hearing_date:
+            if isinstance(last_hearing_date, str):
+                last_hearing_date = date.fromisoformat(last_hearing_date)
+
+            days_since = (datetime.now(KATHMANDU_TZ).date() - last_hearing_date).days
+            is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY
+            self.logger.info(
+                f"[{case_number}] Last hearing {days_since} days ago -> old_enough={is_old_enough}"
             )
-            return False
+            return is_old_enough
 
-        if isinstance(last_hearing_date, str):
-            last_hearing_date = date.fromisoformat(last_hearing_date)
+        # Fallback to registration date if no hearing data
+        if registration_date_ad:
+            if isinstance(registration_date_ad, str):
+                registration_date_ad = date.fromisoformat(registration_date_ad)
 
-        days_since = (datetime.now(KATHMANDU_TZ).date() - last_hearing_date).days
-        is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY
-        self.logger.info(
-            f"[{case_number}] Last hearing {days_since} days ago -> old_enough={is_old_enough}"
+            days_since = (datetime.now(KATHMANDU_TZ).date() - registration_date_ad).days
+            is_old_enough = days_since >= MIN_DAYS_FOR_DOCUMENT_AVAILABILITY
+            self.logger.info(
+                f"[{case_number}] No hearing data, using registration date: "
+                f"{days_since} days ago -> old_enough={is_old_enough}"
+            )
+            return is_old_enough
+
+        # No date available - treat as too recent to be safe
+        self.logger.warning(
+            f"[{case_number}] No hearing or registration date — treating as too recent (soft-skip)"
         )
-        return is_old_enough
+        return False
 
     def _get_cases_to_scrape(self):
         """Query decided Special/Supreme Court cases not yet scraped."""
@@ -320,6 +341,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     "case_number": c.case_number,
                     "court_identifier": c.court_identifier,
                     "registration_date_bs": c.registration_date_bs,
+                    "registration_date_ad": c.registration_date_ad,
                     "last_hearing_date": hearing_dates.get(
                         (c.case_number, c.court_identifier)
                     ),
@@ -645,7 +667,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         if "रेकर्ड भेटिएन" in response.text:
             # Check if case is too recent before marking as failed
             is_old_enough = self._is_case_old_enough(
-                response.meta.get("last_hearing_date"), case_number
+                response.meta.get("last_hearing_date"),
+                case_number,
+                response.meta.get("registration_date_ad"),
             )
             error = "no_records_old_case" if is_old_enough else "too_recent"
 
@@ -702,7 +726,9 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         if not doc_urls:
             is_old_enough = self._is_case_old_enough(
-                response.meta.get("last_hearing_date"), case_number
+                response.meta.get("last_hearing_date"),
+                case_number,
+                response.meta.get("registration_date_ad"),
             )
             error = "no_docs_old_case" if is_old_enough else "too_recent"
             if is_old_enough:
