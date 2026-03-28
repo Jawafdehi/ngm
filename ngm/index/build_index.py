@@ -814,7 +814,7 @@ class IndexBuilder:
 
 def get_base_url() -> str:
     """Get the base URL from environment, defaulting to the production ngm store."""
-    return os.getenv("NGM_STORE_BASE_URL", "https://ngm-store.newnepal.org").rstrip("/")
+    return os.getenv("NGM_STORE_BASE_URL", "https://ngm-store.jawafdehi.org").rstrip("/")
 
 
 def main() -> None:
