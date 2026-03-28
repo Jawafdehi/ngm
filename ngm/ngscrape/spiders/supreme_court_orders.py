@@ -4,12 +4,12 @@ Supreme Court Orders Spider
 Scrapes order documents for Special and Supreme Court cases via a CAPTCHA-protected
 search form. Yields items to SupremeCourtOrdersPipeline for download and DB update.
 
-Courts: Special (priority 1) → Supreme (priority 2)
+Priority based on court order document availability: Special/CR → Supreme/WH → Supreme/WF → Supreme/WO → Special/Other → Supreme/Other → Special/OA
 
 Rate limiting
 ─────────────
-The spider processes ~200 cases/hour by default in prod/GitHub Actions.
-Each GitHub Actions job runs up to 6 hours (~1200 cases/job). The workflow
+The spider processes ~600 cases/hour by default in prod/GitHub Actions.
+Each GitHub Actions job runs up to 6 hours (~3000 cases/job with 1-hour buffer). The workflow
 re-triggers every 8 hours so there is continuous coverage.
 
 Override the rate locally:
@@ -43,13 +43,15 @@ HOMEPAGE_URL = "https://supremecourt.gov.np/cp/"
 
 # Default cases to process per run.
 # Each case requires ~2 HTTP requests (homepage GET + form POST).
-# To get 200 cases/hour: 200 cases × 2 requests = 400 requests/hour → 9s per request.
-# Each GH Actions job runs ~6 hours → 200 cases/hour × 6 hours = 1200 cases/job.
-DEFAULT_CASES_PER_RUN = 1200
+# To get 600 cases/hour: 600 cases x 2 requests = 1200 requests/hour -> 3s per request.
+# Each GH Actions job runs ~6 hours -> 600 cases/hour x 5 hours = 3000 cases/job.
+# Set to 3000 (not 3600) to provide ~1 hour buffer for DB overhead, CAPTCHA retries,
+# HTTP retries, homepage GETs, and redirects to avoid GH Actions 6-hour timeout.
+DEFAULT_CASES_PER_RUN = 3000
 
-# Seconds between requests to achieve ~200 cases/hour.
-# 9s delay × 2 requests per case = 18s per case = 200 cases/hour.
-PROD_DOWNLOAD_DELAY = 9
+# Seconds between requests to achieve ~600 cases/hour.
+# 3s delay x 2 requests per case = 6s per case = 600 cases/hour.
+PROD_DOWNLOAD_DELAY = 3
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
@@ -220,16 +222,66 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             )
         )
 
-        court_priority = sql_case(
-            (CourtCase.court_identifier == "special", 1),
-            (CourtCase.court_identifier == "supreme", 2),
+        # Priority: Special/CR → Supreme/WH → Supreme/WF → Supreme/WO → Special/Other → Supreme/Other → Special/OA (last)
+        case_type_priority = sql_case(
+            # Priority 1: Special/CR
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    CourtCase.case_number.op("~")(r"^\d+-CR-"),
+                ),
+                1,
+            ),
+            # Priority 2: Supreme/WH
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WH-"),
+                ),
+                2,
+            ),
+            # Priority 3: Supreme/WF
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WF-"),
+                ),
+                3,
+            ),
+            # Priority 4: Supreme/WO
+            (
+                and_(
+                    CourtCase.court_identifier == "supreme",
+                    CourtCase.case_number.op("~")(r"^\d+-WO-"),
+                ),
+                4,
+            ),
+            # Priority 5: Special/Other (non-OA, CR already matched above)
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    ~CourtCase.case_number.op("~")(r"^\d+-OA-"),
+                ),
+                5,
+            ),
+            # Priority 6: Supreme/Other
+            (CourtCase.court_identifier == "supreme", 6),
+            # Priority 7: Special/OA (0% success - lowest priority)
+            (
+                and_(
+                    CourtCase.court_identifier == "special",
+                    CourtCase.case_number.op("~")(r"^\d+-OA-"),
+                ),
+                7,
+            ),
             else_=99,
         )
 
         with self.session.begin():
             cases = (
                 query.order_by(
-                    court_priority, CourtCase.registration_date_ad.desc().nullslast()
+                    case_type_priority,
+                    CourtCase.registration_date_ad.desc().nullslast(),
                 )
                 .limit(self.limit)
                 .all()
@@ -331,8 +383,12 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         case_number = case_data["case_number"]
         processed = self.total_cases - len(self._pending_cases)
 
+        # Extract case type from case number (e.g., "082-CR-0051" -> "CR")
+        case_type_match = re.match(r"^\d+-([A-Z]+)-", case_number)
+        case_type = case_type_match.group(1) if case_type_match else "Unknown"
+
         self.logger.info(
-            f"[{processed}/{self.total_cases}] Processing case {case_number} "
+            f"[{processed}/{self.total_cases}] Scraping {case_type} case {case_number} "
             f"(court={case_data['court_identifier']})"
         )
 
@@ -587,9 +643,28 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
             return
 
         if "रेकर्ड भेटिएन" in response.text:
-            self.logger.warning(
-                f"[{case_number}] No records found. Will retry next run."
+            # Check if case is too recent before marking as failed
+            is_old_enough = self._is_case_old_enough(
+                response.meta.get("last_hearing_date"), case_number
             )
+            error = "no_records_old_case" if is_old_enough else "too_recent"
+
+            if is_old_enough:
+                self.logger.warning(
+                    f"[{case_number}] No records found (old case) — marking as permanent failure."
+                )
+            else:
+                self.logger.info(
+                    f"[{case_number}] No records found (recent case) — will recheck in {TOO_RECENT_RECHECK_DAYS} days."
+                )
+
+            # Yield to pipeline to mark in database
+            yield {
+                "file_urls": [],
+                "case_number": case_number,
+                "court_identifier": court_identifier,
+                "error": error,
+            }
             yield from self._next_request()
             return
 
