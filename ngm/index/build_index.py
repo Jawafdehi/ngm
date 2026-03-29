@@ -49,9 +49,16 @@ class IndexBuilder:
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
         self.page_size = page_size
 
-        # Initialize database engine for fiscal year validation
+        # Database engine for fiscal year validation (lazy initialized)
         # Sessions are created per-thread to avoid threading issues
-        self.engine = get_engine()
+        self._engine = None
+
+    @property
+    def engine(self):
+        """Lazy-load database engine only when needed."""
+        if self._engine is None:
+            self._engine = get_engine()
+        return self._engine
 
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
