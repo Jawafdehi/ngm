@@ -181,7 +181,7 @@ class IndexBuilder:
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
-            # self._build_court_orders_node,  # Temporarily disabled
+            self._build_court_orders_node,
         )
 
         # Each builder scans S3 independently — run them concurrently.
