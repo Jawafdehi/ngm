@@ -85,7 +85,7 @@ class IndexBuilder:
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
-            self._build_court_orders_node,
+            # self._build_court_orders_node,  # Temporarily disabled
         )
 
         # Each builder scans S3 independently — run them concurrently.
@@ -814,7 +814,9 @@ class IndexBuilder:
 
 def get_base_url() -> str:
     """Get the base URL from environment, defaulting to the production ngm store."""
-    return os.getenv("NGM_STORE_BASE_URL", "https://ngm-store.jawafdehi.org").rstrip("/")
+    return os.getenv("NGM_STORE_BASE_URL", "https://ngm-store.jawafdehi.org").rstrip(
+        "/"
+    )
 
 
 def main() -> None:
