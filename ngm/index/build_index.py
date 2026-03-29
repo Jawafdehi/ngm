@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from cloudpathlib import AnyPath
+from sqlalchemy.exc import SQLAlchemyError
 
 from .models import Manuscript, IndexNode
 from ..database.models import get_engine, get_session, CourtCase
@@ -545,7 +546,7 @@ class IndexBuilder:
                     year, registration_date = self._lookup_case_fiscal_year(
                         case_number, court_type
                     )
-                    logger.info(
+                    logger.debug(
                         "court-orders/%s: Case %s (filename: %s) → FY %s (registration: %s)",
                         court_type,
                         case_number,
@@ -553,7 +554,7 @@ class IndexBuilder:
                         year,
                         registration_date,
                     )
-                except Exception as e:
+                except (ValueError, SQLAlchemyError) as e:
                     logger.error(
                         "court-orders/%s: Failed to determine fiscal year for case %s (filename: %s): %s",
                         court_type,
