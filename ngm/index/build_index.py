@@ -16,8 +16,10 @@ from datetime import datetime
 from typing import Any
 
 from cloudpathlib import AnyPath
+from sqlalchemy.exc import SQLAlchemyError
 
 from .models import Manuscript, IndexNode
+from ..database.models import get_engine, get_session, CourtCase
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +50,114 @@ class IndexBuilder:
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
         self.page_size = page_size
 
+        # Database engine for fiscal year validation (lazy initialized)
+        # Sessions are created per-thread to avoid threading issues
+        self._engine = None
+
+    @property
+    def engine(self):
+        """Lazy-load database engine only when needed."""
+        if self._engine is None:
+            self._engine = get_engine()
+        return self._engine
+
     def _build_folder_structure(self, *parts: str):
         """Build path under uploads/ directory."""
         p = self.root_path / "uploads"
         for part in parts:
             p = p / part
         return p
+
+    def _calculate_fiscal_year_from_registration(
+        self, registration_bs: str
+    ) -> int | None:
+        """Calculate fiscal year from BS registration date.
+
+        Nepal's fiscal year runs from Shrawan (month 4) to Ashar (month 3).
+        Months 1-3 belong to previous fiscal year, months 4-12 to current year.
+        """
+        try:
+            parts = registration_bs.split("-")
+            if len(parts) != 3:
+                return None
+
+            year = int(parts[0])
+            month = int(parts[1])
+
+            if 1 <= month <= 3:
+                # Baisakh, Jestha, Ashar - belongs to previous fiscal year
+                return year - 1
+            elif 4 <= month <= 12:
+                # Shrawan through Chaitra - belongs to current fiscal year
+                return year
+            return None
+        except (ValueError, IndexError):
+            return None
+
+    def _extract_case_number_from_filename(self, filename: str) -> str:
+        """Extract case number from filename by removing extension and version numbers."""
+        # Remove file extension: "082-OA-0503.1.docx" -> "082-OA-0503.1"
+        name_without_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
+        # Remove trailing version numbers: "082-OA-0503.1" -> "082-OA-0503"
+        case_number = (
+            name_without_ext.rsplit(".", 1)[0]
+            if "." in name_without_ext
+            else name_without_ext
+        )
+        return case_number
+
+    def _lookup_case_fiscal_year(
+        self, case_number: str, court_identifier: str
+    ) -> tuple[str, str]:
+        """Look up case in database and return fiscal year and registration date."""
+        # Create a new session for this thread
+        session = get_session(self.engine)
+
+        try:
+            with session.begin():
+                case = (
+                    session.query(CourtCase)
+                    .filter(
+                        CourtCase.case_number == case_number,
+                        CourtCase.court_identifier == court_identifier,
+                    )
+                    .first()
+                )
+
+                if not case:
+                    raise ValueError(
+                        f"Case {case_number} not found in database for court {court_identifier}. "
+                        f"Cannot determine fiscal year for indexing."
+                    )
+
+                if not case.registration_date_bs:
+                    raise ValueError(
+                        f"Case {case_number} found in database but registration_date_bs is missing. "
+                        f"Cannot determine fiscal year for indexing."
+                    )
+
+                fiscal_year = self._calculate_fiscal_year_from_registration(
+                    case.registration_date_bs
+                )
+                if fiscal_year is None:
+                    raise ValueError(
+                        f"Case {case_number} has invalid registration_date_bs format: {case.registration_date_bs}. "
+                        f"Cannot determine fiscal year for indexing."
+                    )
+
+                # Convert to 3-digit year string (e.g., 2067 -> "067")
+                year_str = str(fiscal_year)
+                if len(year_str) == 4 and year_str.startswith("20"):
+                    fiscal_year_3digit = year_str[2:].zfill(
+                        3
+                    )  # "2067" -> "067", "2063" -> "063"
+                    return (fiscal_year_3digit, case.registration_date_bs)
+                else:
+                    raise ValueError(
+                        f"Case {case_number} has unexpected fiscal year format: {fiscal_year}"
+                    )
+        finally:
+            session.close()
 
     def _relative_path(self, file_path) -> str:
         """Get relative path string from a path object relative to root_path.
@@ -85,7 +189,7 @@ class IndexBuilder:
             self._build_kanun_patrika_node,
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
-            # self._build_court_orders_node,  # Temporarily disabled
+            self._build_court_orders_node,
         )
 
         # Each builder scans S3 independently — run them concurrently.
@@ -420,20 +524,49 @@ class IndexBuilder:
 
             file_count += 1
 
-            # Extract year from filename (e.g., "082-OA-0503.1.docx" -> "082")
             filename = file_path.name
-            year_match = filename.split("-")[0] if "-" in filename else None
+            case_number = self._extract_case_number_from_filename(filename)
 
-            if year_match and year_match.isdigit() and len(year_match) == 3:
-                year = year_match
-                if year not in year_groups:
-                    year_groups[year] = []
-                year_groups[year].append(file_path)
+            # Check if filename matches expected pattern: YYY-TYPE-NNNN
+            # First part should be a 3-digit year
+            parts = filename.split("-")
+            filename_year = None
+
+            if len(parts) >= 2:
+                first_part = parts[0]
+                if first_part.isdigit() and len(first_part) == 3:
+                    filename_year = first_part
+
+            # Determine year: use filename if available, otherwise lookup in database
+            if filename_year is not None:
+                year = filename_year
             else:
-                raise ValueError(
-                    f"court-orders/{court_type}: invalid filename pattern '{filename}' "
-                    f"— expected format: YYY-..., where YYY is a 3-digit year"
-                )
+                # Unexpected pattern - lookup in database
+                try:
+                    year, registration_date = self._lookup_case_fiscal_year(
+                        case_number, court_type
+                    )
+                    logger.debug(
+                        "court-orders/%s: Case %s (filename: %s) → FY %s (registration: %s)",
+                        court_type,
+                        case_number,
+                        filename,
+                        year,
+                        registration_date,
+                    )
+                except (ValueError, SQLAlchemyError) as e:
+                    logger.error(
+                        "court-orders/%s: Failed to determine fiscal year for case %s (filename: %s): %s",
+                        court_type,
+                        case_number,
+                        filename,
+                        e,
+                    )
+                    raise
+
+            if year not in year_groups:
+                year_groups[year] = []
+            year_groups[year].append(file_path)
 
             # Log progress when interval reached
             if file_count % log_interval == 0:
@@ -503,18 +636,8 @@ class IndexBuilder:
         case_groups: dict[str, list] = {}
 
         for file_path in file_paths:
-            filename = file_path.name
-            # Extract case number: remove file extension and any trailing version numbers
-            # e.g., "082-OA-0503.1.docx" -> "082-OA-0503"
-            name_without_ext = (
-                filename.rsplit(".", 1)[0] if "." in filename else filename
-            )
-            # Remove trailing version numbers like ".1", ".2", etc.
-            case_number = (
-                name_without_ext.rsplit(".", 1)[0]
-                if "." in name_without_ext
-                else name_without_ext
-            )
+            # Extract case number using helper method
+            case_number = self._extract_case_number_from_filename(file_path.name)
 
             if case_number not in case_groups:
                 case_groups[case_number] = []
