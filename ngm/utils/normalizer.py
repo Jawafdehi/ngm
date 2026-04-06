@@ -81,7 +81,8 @@ def normalize_date(date_str):
         date_str: Date string in various Nepali formats
 
     Returns:
-        Date string in YYYY-MM-DD format with zero-padding
+        Date string in YYYY-MM-DD format with zero-padding.
+        Returns empty string if parsed date parts are invalid.
     """
     if not date_str:
         return date_str
@@ -104,13 +105,23 @@ def normalize_date(date_str):
     if len(parts) == 3:
         try:
             # Zero-pad year (4 digits), month (2 digits), day (2 digits)
-            year = parts[0].zfill(4)
-            month = parts[1].zfill(2)
-            day = parts[2].zfill(2)
+            year_int = int(parts[0])
+            month_int = int(parts[1])
+            day_int = int(parts[2])
+
+            # Basic BS range validation to prevent impossible dates.
+            # We intentionally keep day upper-bound broad (1-32) because
+            # month lengths differ in BS calendar by year.
+            if year_int <= 0 or not (1 <= month_int <= 12) or not (1 <= day_int <= 32):
+                return ""
+
+            year = str(year_int).zfill(4)
+            month = str(month_int).zfill(2)
+            day = str(day_int).zfill(2)
             return f"{year}-{month}-{day}"
         except (ValueError, IndexError):
             # If parsing fails, return as-is
-            return date_str
+            return ""
 
     return date_str
 
