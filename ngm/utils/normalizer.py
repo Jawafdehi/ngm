@@ -100,8 +100,8 @@ def normalize_date(date_str):
     date_str = date_str.replace(".", "-")  # Period
     date_str = date_str.replace(" ", "-")  # Space
 
-    # Split into parts and zero-pad
-    parts = date_str.split("-")
+    # Split into parts (collapse repeated separators) and zero-pad
+    parts = [p for p in re.split(r"-+", date_str) if p]
     if len(parts) == 3:
         try:
             # Zero-pad year (4 digits), month (2 digits), day (2 digits)
@@ -120,10 +120,10 @@ def normalize_date(date_str):
             day = str(day_int).zfill(2)
             return f"{year}-{month}-{day}"
         except (ValueError, IndexError):
-            # If parsing fails, return as-is
+            # On parse failure, return an empty string.
             return ""
 
-    return date_str
+    return ""
 
 
 def fix_parenthesis_spacing(text):
