@@ -31,11 +31,16 @@ class LLMVerifier:
         # Parse provider:model format
         if ":" in llm_config:
             provider, model = llm_config.split(":", 1)
-            self.provider = provider
-            self.model = model
+            self.provider = provider.strip()
+            self.model = model.strip()
         else:
             self.provider = "google_genai"
             self.model = llm_config
+
+        if self.provider != "google_genai":
+            raise ValueError(
+                f"Unsupported LLM provider: {self.provider}. Supported: google_genai"
+            )
 
         self.api_key = os.environ.get("LLM_API_KEY")
 
@@ -185,9 +190,19 @@ Answer with JSON only (no other text):
                     if matched_index is not None and 1 <= matched_index <= len(
                         candidates
                     ):
-                        matched_press_id = int(
-                            candidates[matched_index - 1].get("press_id", 0)
-                        )
+                        raw_press_id = candidates[matched_index - 1].get("press_id")
+                        try:
+                            matched_press_id = (
+                                int(raw_press_id) if raw_press_id is not None else None
+                            )
+                        except (TypeError, ValueError):
+                            matched_press_id = None
+                            logger.warning(
+                                "[%s] Failed to parse press_id from candidate %d: %s",
+                                case_num,
+                                matched_index,
+                                raw_press_id,
+                            )
 
                     results[case_num] = (matched_press_id, confidence, explanation)
 
