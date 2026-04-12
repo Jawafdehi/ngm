@@ -65,32 +65,19 @@ class LLMVerifier:
 
         return self._client
 
-    def verify_multi_case_batch(
-        self,
-        cases: list[dict],
+    def _verify_single_batch(
+        self, cases: list[dict]
     ) -> dict[str, tuple[Optional[int], float, str]]:
         """
-        Verify multiple cases in a single LLM call for maximum efficiency.
+        Verify a single batch of cases with LLM.
 
-        Args:
-            cases: List of dicts with keys:
-                - case_number: str
-                - defendant_names: list[str]
-                - press_release_candidates: list[dict] with 'press_id' and 'title'
-
-        Returns:
-            Dict mapping case_number -> (matched_press_id or None, confidence, explanation)
+        Internal method used by verify_multi_case_batch for chunked processing.
         """
-        if not cases:
-            return {}
-
-        # Build prompt for all cases
+        # Build prompt for this batch
         cases_text = []
         for i, case in enumerate(cases):
             case_num = case["case_number"]
-            defendants = case[
-                "defendant_names"
-            ]  # Changed from defendant_name to defendant_names (list)
+            defendants = case["defendant_names"]
             candidates = case["press_release_candidates"]
 
             # Format defendants as numbered list
@@ -207,7 +194,7 @@ Answer with JSON only (no other text):
                     results[case_num] = (matched_press_id, confidence, explanation)
 
                     logger.debug(
-                        "[%s] LLM multi-case batch: matched_press_id=%s, confidence=%.2f",
+                        "[%s] LLM batch: matched_press_id=%s, confidence=%.2f",
                         case_num,
                         matched_press_id,
                         confidence,
@@ -215,20 +202,74 @@ Answer with JSON only (no other text):
                 else:
                     # No result found for this case
                     results[case_num] = (None, 0.0, "No result from LLM")
-                    logger.warning(
-                        "[%s] No result in LLM multi-case batch response", case_num
-                    )
+                    logger.warning("[%s] No result in LLM batch response", case_num)
 
             return results
 
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse LLM multi-case batch response: %s", e)
+            logger.error("Failed to parse LLM batch response: %s", e)
             return {
                 case["case_number"]: (None, 0.0, f"JSON parse error: {e}")
                 for case in cases
             }
         except Exception as e:
-            logger.error("LLM multi-case batch verification failed: %s", e)
+            logger.error("LLM batch verification failed: %s", e)
             return {
                 case["case_number"]: (None, 0.0, f"LLM error: {e}") for case in cases
             }
+
+    def verify_multi_case_batch(
+        self,
+        cases: list[dict],
+        chunk_size: int = 20,
+    ) -> dict[str, tuple[Optional[int], float, str]]:
+        """
+        Verify multiple cases using chunked LLM calls for resilience.
+
+        Processes cases in batches to avoid context/rate limit failures.
+        If one batch fails, other batches continue processing.
+
+        Args:
+            cases: List of dicts with keys:
+                - case_number: str
+                - defendant_names: list[str]
+                - press_release_candidates: list[dict] with 'press_id' and 'title'
+            chunk_size: Maximum cases per LLM call (default: 20)
+
+        Returns:
+            Dict mapping case_number -> (matched_press_id or None, confidence, explanation)
+        """
+        if not cases:
+            return {}
+
+        all_results: dict[str, tuple[Optional[int], float, str]] = {}
+
+        # Process in chunks to avoid context/rate limit failures
+        total_cases = len(cases)
+        for i in range(0, total_cases, chunk_size):
+            batch = cases[i : i + chunk_size]
+            batch_num = (i // chunk_size) + 1
+            total_batches = (total_cases + chunk_size - 1) // chunk_size
+
+            logger.info(
+                "Processing LLM batch %d/%d (%d cases)",
+                batch_num,
+                total_batches,
+                len(batch),
+            )
+
+            try:
+                batch_results = self._verify_single_batch(batch)
+                all_results.update(batch_results)
+            except Exception as e:
+                # Log error but continue with other batches
+                logger.error("Batch %d/%d failed: %s", batch_num, total_batches, e)
+                # Add failure results for this batch
+                for case in batch:
+                    all_results[case["case_number"]] = (
+                        None,
+                        0.0,
+                        f"Batch processing error: {e}",
+                    )
+
+        return all_results
