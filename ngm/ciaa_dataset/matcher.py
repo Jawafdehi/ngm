@@ -16,7 +16,7 @@ from ngm.ciaa_dataset.models import MatchResult, PressReleaseRecord, AbhiyogPatr
 logger = logging.getLogger(__name__)
 
 # Confidence thresholds
-CONFIRMED_THRESHOLD = 0.7
+CONFIRMED_THRESHOLD = 0.6
 NEEDS_REVIEW_THRESHOLD = 0.2
 
 # Honorifics to strip from Nepali names before comparison
