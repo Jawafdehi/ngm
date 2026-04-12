@@ -181,8 +181,14 @@ def run_fiscal_year(
                         )
                     ]
                     match.confidence = max(match.confidence, llm_confidence)
-                    match.match_signals = matched_signals + [
-                        f"llm_multi_case_batch({llm_confidence:.2f})"
+                    # Preserve existing signals (e.g., ag_index_exact_match)
+                    preserved_signals = [
+                        s for s in match.match_signals if s.startswith("ag_index_")
+                    ]
+                    match.match_signals = [
+                        *preserved_signals,
+                        *matched_signals,
+                        f"llm_multi_case_batch({llm_confidence:.2f})",
                     ]
                     match.match_status = (
                         "confirmed"

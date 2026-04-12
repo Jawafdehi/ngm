@@ -44,6 +44,10 @@ def calculate_month_id(year: int, month: int) -> int:
 
     2078: 1-12, 2079: 13-24, 2080: 25-36, etc.
     """
+    if year < 2078:
+        raise ValueError("AG month_id starts at BS 2078")
+    if not 1 <= month <= 12:
+        raise ValueError("month must be in 1..12")
     return (year - 2078) * 12 + month
 
 

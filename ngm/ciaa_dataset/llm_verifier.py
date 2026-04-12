@@ -168,7 +168,15 @@ Answer with JSON only (no other text):
                     except (TypeError, ValueError):
                         matched_index = None
 
-                    confidence = float(result.get("confidence", 0.0))
+                    # Safely parse confidence (LLM might return non-numeric)
+                    confidence_raw = result.get("confidence")
+                    try:
+                        confidence = (
+                            float(confidence_raw) if confidence_raw is not None else 0.0
+                        )
+                    except (TypeError, ValueError):
+                        confidence = 0.0
+
                     explanation = result.get("explanation", "")
 
                     # Convert 1-based index to press_id
