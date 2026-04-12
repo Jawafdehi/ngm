@@ -150,12 +150,23 @@ class MatchingEngine:
         )
 
     def _candidates(self, case_date_bs: str) -> list[dict]:
-        """Return press releases from the same month as case date, plus undated ones."""
+        """Return press releases from the same month as case date, plus adjacent months and undated ones."""
         ym = _parse_bs_month(case_date_bs)
         buckets: set[tuple[int, int]] = {(-1, -1)}  # always include undated
 
         if ym:
-            buckets.add(ym)  # Just the same month
+            year, month = ym
+            # Include same month, previous month, and next month
+            # to catch PRs within ±2 days that cross month boundaries
+            buckets.update(
+                {
+                    ym,  # Same month
+                    (
+                        (year - 1, 12) if month == 1 else (year, month - 1)
+                    ),  # Previous month
+                    (year + 1, 1) if month == 12 else (year, month + 1),  # Next month
+                }
+            )
 
         candidates = []
         for bucket in buckets:
@@ -266,9 +277,13 @@ class MatchingEngine:
 
         best_score, best_pr, best_signals = scored_candidates[0]
 
-        # LLM verification for all non-high-confidence matches (< 0.7)
-        # IMPORTANT: Send ALL defendants to LLM
-        if best_score < 0.7 and all_defendants:
+        # LLM verification for non-high-confidence matches
+        # Only defer if caller requested it and score is in review range
+        if (
+            defer_llm
+            and all_defendants
+            and NEEDS_REVIEW_THRESHOLD <= best_score < CONFIRMED_THRESHOLD
+        ):
             # Get top 5 candidates for batch verification
             top_candidates = [pr for _, pr, _ in scored_candidates[:5]]
 

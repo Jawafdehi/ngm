@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from ngm.database.models import CourtCase
@@ -57,8 +58,19 @@ class CIAACaseBuilder:
         """
         fy_str = str(fiscal_year)
 
-        # Defendants from database
-        defendant_objs = [Defendant(name=d["name"]) for d in (defendants or [])]
+        # Defendants from database; fallback to parsing case.defendant text
+        if defendants:
+            defendant_objs = [
+                Defendant(name=d["name"]) for d in defendants if d.get("name")
+            ]
+        else:
+            # Fallback: parse case.defendant text
+            raw = (case.defendant or "").strip()
+            # Split on common separators: comma, semicolon, pipe, slash
+            # Remove "समेत" suffix if present
+            raw = raw.split("समेत")[0].strip()
+            parsed = [n.strip() for n in re.split(r"[,;|/]+", raw) if n.strip()]
+            defendant_objs = [Defendant(name=n) for n in parsed]
 
         # Determine current_status
         status = case.case_status or ""

@@ -23,6 +23,11 @@ class LLMVerifier:
         self._client = None
         llm_config = os.environ.get("LLM")
 
+        if not llm_config:
+            raise ValueError(
+                "LLM environment variable not set (expected format: provider:model or just model-name)"
+            )
+
         # Parse provider:model format
         if ":" in llm_config:
             provider, model = llm_config.split(":", 1)
@@ -152,7 +157,17 @@ Answer with JSON only (no other text):
                         break
 
                 if result:
-                    matched_index = result.get("matched_pr_index")
+                    # Safely parse matched_pr_index (LLM might return string)
+                    matched_index_raw = result.get("matched_pr_index")
+                    try:
+                        matched_index = (
+                            int(matched_index_raw)
+                            if matched_index_raw is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        matched_index = None
+
                     confidence = float(result.get("confidence", 0.0))
                     explanation = result.get("explanation", "")
 

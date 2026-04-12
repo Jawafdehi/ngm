@@ -43,13 +43,18 @@ def run_fiscal_year(
     Returns a stats dict.
     """
     from ngm.ciaa_dataset.loader import DataLoader
-    from ngm.ciaa_dataset.matcher import MatchingEngine
+    from ngm.ciaa_dataset.matcher import MatchingEngine, CONFIRMED_THRESHOLD
     from ngm.ciaa_dataset.builder import CIAACaseBuilder
     from ngm.ciaa_dataset.writer import FileWriter
     from ngm.ciaa_dataset.models import PressReleaseRecord
 
     fy_str = str(fiscal_year)
     logger.info("=== Processing fiscal year %s ===", fy_str)
+
+    # Provide default path if not specified
+    press_releases_csv_path = (
+        press_releases_csv_path or "ngm/ciaa_dataset/data/ciaa-press-releases.csv"
+    )
 
     loader = DataLoader(
         ag_index_path=ag_index_path,
@@ -86,12 +91,12 @@ def run_fiscal_year(
 
     total_cases = len(court_cases)
     logger.info("Phase 1: Processing %d cases...", total_cases)
-    
+
     for idx, case in enumerate(court_cases, 1):
         # Log progress every 10 cases
         if idx % 10 == 0 or idx == total_cases:
             logger.info("  [%d/%d] cases processed", idx, total_cases)
-            
+
         # Resolve appeal
         appeal = None
         if case.case_number in punaravedan_index:
@@ -180,7 +185,9 @@ def run_fiscal_year(
                         f"llm_multi_case_batch({llm_confidence:.2f})"
                     ]
                     match.match_status = (
-                        "confirmed" if llm_confidence >= 0.7 else "needs_review"
+                        "confirmed"
+                        if match.confidence >= CONFIRMED_THRESHOLD
+                        else "needs_review"
                     )
                     match.unmatched_reason = None
 
@@ -237,6 +244,8 @@ def run_fiscal_year(
         writer.write_fiscal_year_index(fy_str, written_cases, stats)
     except Exception as e:
         logger.error("Failed to write FY index for %s: %s", fy_str, e)
+        stats["write_failures"] += 1
+        raise
 
     return stats
 

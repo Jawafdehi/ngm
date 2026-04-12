@@ -176,6 +176,14 @@ def main() -> None:
         logger.error("Years must be comma-separated integers (e.g., 2078,2079,2080)")
         sys.exit(1)
 
+    invalid_years = [year for year in years if year < 2078]
+    if invalid_years:
+        logger.error(
+            "Unsupported BS year(s): %s. AG month_id starts at 2078.",
+            invalid_years,
+        )
+        sys.exit(1)
+
     logger.info("=" * 60)
     logger.info("Building AG charge sheet index")
     logger.info("=" * 60)
@@ -214,27 +222,26 @@ def main() -> None:
     logger.info("")
     logger.info(f"Indexed {len(all_sheets)} unique charge sheets")
 
-    # Export CSV
-    if all_sheets:
-        fieldnames = ["case_number", "title", "filing_date", "pdf_url", "court_office"]
+    # Export CSV (always write, even if empty, to avoid stale files)
+    fieldnames = ["case_number", "title", "filing_date", "pdf_url", "court_office"]
 
-        try:
-            with open(args.output, "w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
+    try:
+        with open(args.output, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
 
-                # Sort by case number for readability and write deduplicated records
-                for sheet in sorted(
-                    all_sheets.values(), key=lambda x: x["case_number"]
-                ):
-                    writer.writerow(sheet)
+            # Sort by case number for readability and write deduplicated records
+            for sheet in sorted(all_sheets.values(), key=lambda x: x["case_number"]):
+                writer.writerow(sheet)
 
-            logger.info(
-                f"✓ Saved {len(all_sheets)} deduplicated records to {args.output}"
-            )
-        except OSError as e:
-            logger.error(f"Failed to write CSV file: {e}")
-            sys.exit(1)
+        logger.info(
+            "✓ Saved %d deduplicated records to %s",
+            len(all_sheets),
+            args.output,
+        )
+    except OSError as e:
+        logger.error(f"Failed to write CSV file: {e}")
+        sys.exit(1)
 
     logger.info("")
     logger.info("=" * 60)

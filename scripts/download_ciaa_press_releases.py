@@ -14,9 +14,13 @@ FIELDS = ["press_id", "publication_date", "title", "full_text", "source_url"]
 def fetch_all_manuscripts(index_url):
     manuscripts = []
     url = index_url
+    seen_urls = set()
     while url:
+        if url in seen_urls:
+            raise RuntimeError(f"Cyclic pagination detected at: {url}")
+        seen_urls.add(url)
         print(f"Fetching: {url}")
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         manuscripts.extend(data.get("manuscripts", []))
