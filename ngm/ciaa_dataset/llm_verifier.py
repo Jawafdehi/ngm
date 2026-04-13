@@ -35,7 +35,10 @@ class LLMVerifier:
             self.model = model.strip()
         else:
             self.provider = "google_genai"
-            self.model = llm_config
+            self.model = llm_config.strip()
+
+        if not self.model:
+            raise ValueError("LLM model name must not be empty")
 
         if self.provider != "google_genai":
             raise ValueError(
@@ -241,6 +244,9 @@ Answer with JSON only (no other text):
         """
         if not cases:
             return {}
+
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
 
         all_results: dict[str, tuple[Optional[int], float, str]] = {}
 
