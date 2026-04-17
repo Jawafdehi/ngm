@@ -438,7 +438,7 @@ class MatchingEngine:
         """
         Score ALL candidate groups (same_day, ±1, ±2, undated), pick the highest
         score overall. Date proximity is used as a tiebreaker signal only.
-        Undated PRs require a higher threshold (0.75) since there's no date validation.
+        Undated PRs require a higher threshold (UNDATED_CONFIRMED_THRESHOLD) since there's no date validation.
         """
         candidates = self._candidates(case.registration_date_bs or "")
         case_date = case.registration_date_bs or ""

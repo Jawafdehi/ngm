@@ -68,10 +68,10 @@ class LLMVerifier:
             client = genai.Client(api_key=self.api_key)
             self._client = client
             logger.info("Initialized Google Gemini client with model: %s", self.model)
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
                 "google-genai package not installed. Run: pip install google-genai"
-            )
+            ) from e
 
         return self._client
 

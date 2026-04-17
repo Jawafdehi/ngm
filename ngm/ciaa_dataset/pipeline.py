@@ -240,8 +240,12 @@ def run_fiscal_year(
 
                 matched_pr = None
                 matched_signals = []
-                for score, pr, signals in scored_candidates:
-                    if int(pr.get("press_id", 0)) == matched_press_id:
+                for _score, pr, signals in scored_candidates:
+                    try:
+                        pr_id = int(pr.get("press_id", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if pr_id == matched_press_id:
                         matched_pr = pr
                         matched_signals = signals
                         break
@@ -359,7 +363,14 @@ def run_fiscal_year(
     try:
         writer.flush()
     except Exception as e:
-        logger.error("Failed to flush case writes: %s", e)
+        # Count buffered-but-unflushed cases as failures
+        pending_count = len(writer._pending_writes)
+        if pending_count > 0:
+            stats["written"] -= pending_count
+            stats["write_failures"] += pending_count
+            logger.error("Failed to flush %d pending case writes: %s", pending_count, e)
+        else:
+            logger.error("Failed to flush case writes: %s", e)
         raise
 
     # Write FY index

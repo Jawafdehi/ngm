@@ -209,8 +209,12 @@ class DataLoader:
         index: dict[str, dict] = {}
         with open(self.punaravedan_csv_path, encoding="utf-8") as f:
             # Skip first two lines (blank line and title row)
-            next(f)
-            next(f)
+            for _ in range(2):
+                if next(f, None) is None:
+                    logger.warning(
+                        "punaravedan.csv has fewer than 2 header lines; skipping"
+                    )
+                    return {}
             reader = csv.DictReader(f)
             for row in reader:
                 # CSV columns are in Nepali
@@ -222,20 +226,23 @@ class DataLoader:
                 ).strip()
                 appeal_filing_date = (row.get("पुनरावेदन_दर्ता_मिति") or "").strip()
 
-                # Handle multiple case numbers (take first one)
+                # Handle multiple case numbers (map all to the same appeal)
                 if special_case_raw and supreme_case:
-                    special_case = (
-                        special_case_raw.split()[0]
-                        if special_case_raw.split()
-                        else special_case_raw
-                    )
+                    case_numbers = [
+                        token.strip()
+                        for token in special_case_raw.split()
+                        if token.strip()
+                    ]
+                    if not case_numbers:
+                        case_numbers = [special_case_raw]
 
-                    index[special_case] = {
-                        "supreme_case_number": supreme_case,
-                        "faisala_date": faisala_date,
-                        "appeal_decision_date": appeal_decision_date,
-                        "appeal_filing_date": appeal_filing_date,
-                    }
+                    for case_num in case_numbers:
+                        index[case_num] = {
+                            "supreme_case_number": supreme_case,
+                            "faisala_date": faisala_date,
+                            "appeal_decision_date": appeal_decision_date,
+                            "appeal_filing_date": appeal_filing_date,
+                        }
 
         logger.info("Loaded %d appeal mappings from punaravedan.csv", len(index))
         return index
