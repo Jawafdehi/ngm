@@ -1,13 +1,21 @@
-"""LLM-based verification for defendant name matching in gray-zone cases."""
+"""LLM-based verification for defendant name matching in gray-zone cases.
+
+Supports Google Gemini models for verification.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Retry config for transient errors (503, rate limits)
+_MAX_RETRIES = 3
+_RETRY_DELAYS = [5, 15, 30]  # seconds between retries
 
 
 class LLMVerifier:
@@ -17,41 +25,40 @@ class LLMVerifier:
         """
         Initialize LLM verifier.
 
-        Uses LLM_API_KEY and LLM env variables to determine provider and model.
-        LLM format: "google_genai:model-name" or just "model-name"
+        Supports Google Gemini: "google_genai:model-name" (e.g., "google_genai:gemini-2.0-flash-lite")
         """
         self._client = None
-        llm_config = os.environ.get("LLM")
 
-        if not llm_config:
-            raise ValueError(
-                "LLM environment variable not set (expected format: provider:model or just model-name)"
-            )
-
-        # Parse provider:model format
-        if ":" in llm_config:
-            provider, model = llm_config.split(":", 1)
-            self.provider = provider.strip()
-            self.model = model.strip()
-        else:
-            self.provider = "google_genai"
-            self.model = llm_config.strip()
-
-        if not self.model:
-            raise ValueError("LLM model name must not be empty")
-
-        if self.provider != "google_genai":
-            raise ValueError(
-                f"Unsupported LLM provider: {self.provider}. Supported: google_genai"
-            )
-
+        # Get LLM configuration
         self.api_key = os.environ.get("LLM_API_KEY")
+        llm_config = os.environ.get("LLM")
 
         if not self.api_key:
             raise ValueError("LLM_API_KEY environment variable not set")
 
+        if not llm_config:
+            raise ValueError(
+                "LLM environment variable not set (expected format: google_genai:model-name)"
+            )
+
+        # Parse model from config
+        if ":" in llm_config:
+            provider, model = llm_config.split(":", 1)
+            if provider.strip() != "google_genai":
+                raise ValueError(
+                    f"Unsupported provider: {provider}. Only google_genai is supported"
+                )
+            self.model = model.strip()
+        else:
+            raise ValueError(
+                f"Invalid model format: {llm_config}. Expected format: google_genai:model-name"
+            )
+
+        if not self.model:
+            raise ValueError("Model name must not be empty")
+
     def _get_client(self):
-        """Lazy load LLM client."""
+        """Lazy load Google Gemini client."""
         if self._client is not None:
             return self._client
 
@@ -60,7 +67,7 @@ class LLMVerifier:
 
             client = genai.Client(api_key=self.api_key)
             self._client = client
-            logger.info("Initialized Gemini client with model: %s", self.model)
+            logger.info("Initialized Google Gemini client with model: %s", self.model)
         except ImportError:
             raise ImportError(
                 "google-genai package not installed. Run: pip install google-genai"
@@ -105,15 +112,20 @@ class LLMVerifier:
 
         all_cases_text = "\n\n".join(cases_text)
 
-        prompt = f"""You are verifying which CIAA press release (if any) matches defendants from multiple court cases.
+        prompt = f"""You are verifying which CIAA press release (if any) genuinely matches defendants from multiple court cases.
 
 {all_cases_text}
 
-For each case, determine which press release (if any) mentions ANY of the defendants. Consider:
-- Nepali spelling variations (व/ब, ं/ँ, ष/श, ङ्ग/ंग, etc.)
-- Name order differences (first name last vs last name first)
-- Partial name matches (first name only, last name only)
-- Common honorifics that may be present or absent
+For each case, decide if ANY press release is genuinely about the same case as the defendants listed.
+
+RULES:
+- A name match alone is NOT enough. The press release must be about the SAME corruption case.
+- Require meaningful context overlap: same location, same institution, same type of crime.
+- If the PR is about an annual report, interaction program, or unrelated event — answer null.
+- Different surnames = different person. "भिम प्रसाद लोवा" ≠ "भीम प्रसाद आचार्य" (different surname).
+- A single surname match like "कार्की" or "यादव" is NOT sufficient — require full name match.
+- If unsure, prefer null over a wrong match.
+- NEPALI SPELLING VARIATIONS ARE VALID MATCHES: ण/न (मण्डल=मंडल), व/ब, ष/श, ं/ँ are the same character written differently. "उपेन्द्र मण्डल" and "उपेन्द्र मंडल" ARE the same person.
 
 Answer with JSON only (no other text):
 {{
@@ -122,7 +134,7 @@ Answer with JSON only (no other text):
       "case_number": "080-CR-XXXX",
       "matched_pr_index": null or 1-N (the number from the candidate list for that case),
       "confidence": 0.0 to 1.0,
-      "explanation": "brief explanation in English"
+      "explanation": "brief explanation in English — state what specific text in the PR confirms the match"
     }},
     ...
   ]
@@ -131,9 +143,41 @@ Answer with JSON only (no other text):
         try:
             client = self._get_client()
 
-            # Generate response using Gemini
-            response = client.models.generate_content(model=self.model, contents=prompt)
-            response_text = response.text
+            response_text = None
+            last_error = None
+
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    response = client.models.generate_content(
+                        model=self.model, contents=prompt, config={"temperature": 0.0}
+                    )
+                    response_text = response.text
+                    break  # success
+                except Exception as e:
+                    last_error = e
+                    err_str = str(e)
+                    is_transient = (
+                        "503" in err_str
+                        or "UNAVAILABLE" in err_str
+                        or "429" in err_str
+                        or "rate" in err_str.lower()
+                    )
+
+                    if is_transient and attempt < _MAX_RETRIES - 1:
+                        delay = _RETRY_DELAYS[attempt]
+                        logger.warning(
+                            "LLM transient error (attempt %d/%d), retrying in %ds: %s",
+                            attempt + 1,
+                            _MAX_RETRIES,
+                            delay,
+                            err_str[:100],
+                        )
+                        time.sleep(delay)
+                    else:
+                        raise
+
+            if not response_text:
+                raise last_error or Exception("Failed to get response from LLM")
 
             # Parse JSON response
             response_data = json.loads(response_text)
@@ -224,7 +268,7 @@ Answer with JSON only (no other text):
     def verify_multi_case_batch(
         self,
         cases: list[dict],
-        chunk_size: int = 20,
+        chunk_size: int = 10,
     ) -> dict[str, tuple[Optional[int], float, str]]:
         """
         Verify multiple cases using chunked LLM calls for resilience.
@@ -237,7 +281,7 @@ Answer with JSON only (no other text):
                 - case_number: str
                 - defendant_names: list[str]
                 - press_release_candidates: list[dict] with 'press_id' and 'title'
-            chunk_size: Maximum cases per LLM call (default: 20)
+            chunk_size: Maximum cases per LLM call (default: 10)
 
         Returns:
             Dict mapping case_number -> (matched_press_id or None, confidence, explanation)
@@ -270,12 +314,12 @@ Answer with JSON only (no other text):
             except Exception as e:
                 # Log error but continue with other batches
                 logger.error("Batch %d/%d failed: %s", batch_num, total_batches, e)
-                # Add failure results for this batch
+                # Add failure results for this batch — mark as error not rejection
                 for case in batch:
                     all_results[case["case_number"]] = (
                         None,
                         0.0,
-                        f"Batch processing error: {e}",
+                        f"llm_error: {e}",
                     )
 
         return all_results

@@ -47,7 +47,7 @@ class CaseMeta(BaseModel):
 class CIAACase(BaseModel):
     case_no: str
     case_title: str
-    fiscal_year: str  # e.g. "2080-81"
+    fiscal_year: str  # e.g. "80-81"
     jawafdehi_case_url: Optional[str] = None
     ciaa: CIAABlock = CIAABlock()
     court_case: CourtCaseRecord

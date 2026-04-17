@@ -16,8 +16,50 @@ from ngm.ciaa_dataset.models import MatchResult, PressReleaseRecord, AbhiyogPatr
 logger = logging.getLogger(__name__)
 
 # Confidence thresholds
-CONFIRMED_THRESHOLD = 0.6
-NEEDS_REVIEW_THRESHOLD = 0.2
+CONFIRMED_THRESHOLD = 0.85  # >= 0.85 auto-confirmed, no LLM (balanced approach)
+UNDATED_CONFIRMED_THRESHOLD = 0.90  # Higher bar for undated PRs (no date validation)
+NEEDS_REVIEW_THRESHOLD = 0.0  # Anything below CONFIRMED goes to LLM for verification
+
+# Keywords that indicate a PR is a genuine criminal/corruption case
+# If none of these appear in the PR title, it's not a court case PR
+# NOTE: Old PRs (IDs ~1-730) have generic date-only titles — we skip keyword check for those
+_CRIMINAL_KEYWORDS = [
+    "आरोप-पत्र",
+    "आरोपत्र",
+    "आरोप पत्र",
+    "आरोपपत्र",  # charge sheet (with/without hyphen)
+    "भ्रष्टाचार",  # corruption
+    "नियन्त्रण",  # arrested/controlled
+    "गैरकानूनी",  # illegal
+    "हानि",
+    "हानी",  # loss/damage
+    "घुस",  # bribe
+    "अनियमितता",  # irregularity
+    "दुरुपयोग",  # misuse
+    "नक्कली",  # fake (fake certificate fraud cases)
+    "हिरासत",  # custody/arrest
+    "पक्राउ",  # arrested/caught
+    "निलम्बन",  # suspended
+]
+
+# Phrases that indicate a PR is NOT a criminal case even if it contains criminal keywords
+# e.g. "दुरुपयोग" appears in foundation day speeches about the CIAA itself
+_NON_CRIMINAL_PHRASES = [
+    "स्थापना दिवस",  # foundation/anniversary day
+    "वार्षिक प्रतिवेदन",  # annual report
+    "पदभार ग्रहण",  # taking office ceremony
+    "विदाई",  # farewell
+    "रक्तदान",  # blood donation
+    "अन्तरक्रिया",  # interaction program
+]
+
+# Old PRs (IDs <= 730) have generic date-only titles; skip keyword check for them
+_OLD_PR_THRESHOLD = 730
+
+# Blocklist: PRs that should NEVER be matched (foundation day speeches, etc.)
+_BLOCKED_PR_IDS = {
+    2953,  # Foundation day speech (३४ औं स्थापना दिवस)
+}
 
 # Honorifics to strip from Nepali names before comparison
 _HONORIFICS = re.compile(
@@ -44,20 +86,31 @@ def normalize_nepali(text: str) -> str:
     # Remove honorifics
     text = _HONORIFICS.sub("", text)
 
+    # Remove parentheses and their content (e.g., "(पुन)" -> "पुन")
+    text = text.replace("(", " ").replace(")", " ")
+
     # Character equivalences for common Nepali spelling variations
     # These characters are often used interchangeably or confused
     # IMPORTANT: Process multi-character sequences FIRST before single characters
     equivalences = [
         ("ङ्ग", "ंग"),
         ("न्स", "ंस"),  # अन्सारी vs अंसारी
+        ("ण्ड", "ंड"),  # मण्डल vs मंडल (ण्ड → ंड)
         ("ज़", "ज"),
-        ("ं", "ँ"),
-        ("ँ", "ं"),
+        ("ं", ""),  # Remove anusvara to handle गौस vs गौंस
+        ("ँ", ""),  # Remove chandrabindu
+        ("ी", "ि"),  # Long vs short i vowel: हीम vs हिम
+        ("ू", "ु"),  # Long vs short u vowel
+        ("े", ""),  # Remove e vowel sign for better matching
+        ("ै", ""),  # Remove ai vowel sign
+        ("ो", ""),  # Remove o vowel sign
+        ("ौ", ""),  # Remove au vowel sign
         ("व", "ब"),
         ("ब", "व"),
         ("ष", "श"),
         ("श", "ष"),
-        ("ङ", "ं"),
+        ("ङ", "न"),
+        ("ण", "न"),  # मण्डल vs मंडल, णि vs नि
     ]
 
     for old, new in equivalences:
@@ -114,6 +167,30 @@ def _is_within_date_range(case_date_bs: str, release_date: str) -> bool:
 
     diff = release_days - case_days
     return -2 <= diff <= 2
+
+
+def _calculate_day_difference(case_date: str, pr_date: str) -> Optional[int]:
+    """Calculate absolute day difference between two BS dates."""
+    if not case_date or not pr_date:
+        return None
+
+    def to_approx_days(date_str: str) -> Optional[int]:
+        parts = date_str.split("-")
+        if len(parts) != 3:
+            return None
+        try:
+            y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+            return y * 365 + m * 30 + d
+        except ValueError:
+            return None
+
+    case_days = to_approx_days(case_date)
+    pr_days = to_approx_days(pr_date)
+
+    if case_days is None or pr_days is None:
+        return None
+
+    return abs(case_days - pr_days)
 
 
 class MatchingEngine:
@@ -173,7 +250,43 @@ class MatchingEngine:
             bucket_prs = self._pr_by_month.get(bucket, [])
             candidates.extend(bucket_prs)
 
+        logger.debug(
+            f"Found {len(candidates)} candidate PRs for date {case_date_bs} (buckets: {buckets})"
+        )
         return candidates
+
+    def _is_criminal_case_pr(self, pr: dict) -> bool:
+        """
+        Check if a PR is about a genuine criminal/corruption case.
+        Rejects PRs like annual reports, interaction programs, foundation day speeches etc.
+        Old PRs (ID <= 730) have generic date-only titles — skip keyword check for those.
+        """
+        press_id = int(pr.get("press_id") or 0)
+
+        # REJECT: Blocklisted PRs (foundation day speeches, etc.)
+        if press_id in _BLOCKED_PR_IDS:
+            logger.debug(f"PR #{press_id} rejected: in blocklist")
+            return False
+
+        if press_id <= _OLD_PR_THRESHOLD:
+            return True  # Can't tell from title alone, allow through
+        pr_title = pr.get("title") or ""
+        # Reject if any non-criminal phrase is present (overrides criminal keywords)
+        if any(phrase in pr_title for phrase in _NON_CRIMINAL_PHRASES):
+            logger.debug(f"PR #{press_id} rejected: non-criminal phrase")
+            return False
+        has_keywords = any(keyword in pr_title for keyword in _CRIMINAL_KEYWORDS)
+        if not has_keywords:
+            logger.debug(f"PR #{press_id} rejected: no criminal keywords")
+        return has_keywords
+
+    def _is_surname_only_match(self, defendant_name: str) -> bool:
+        """
+        Check if a defendant name is likely just a surname (single word).
+        Returns True if it's a single word, False if it has multiple words (first + last name).
+        """
+        name_parts = defendant_name.strip().split()
+        return len(name_parts) == 1
 
     def _score_press_release(
         self, case: CourtCase, pr: dict, all_defendants: Optional[list[dict]] = None
@@ -189,6 +302,10 @@ class MatchingEngine:
 
         pr_title = pr.get("title") or ""
         pr_full_text = (pr.get("full_text") or "").strip()
+
+        # REJECT: PR is not a criminal/corruption case (annual reports, programs, etc.)
+        if not self._is_criminal_case_pr(pr):
+            return 0.0, []
 
         # Filter out meaningless full_text (just dashes, whitespace, etc.)
         if pr_full_text and not pr_full_text.replace("-", "").replace("_", "").strip():
@@ -210,35 +327,105 @@ class MatchingEngine:
             if defendant_primary:
                 defendants_to_try = [defendant_primary]
 
-        # Defendant name similarity (full score based on best match)
-        # For long texts, use partial_ratio to find name within text
-        # For very short texts (just a name), use token_set_ratio
+        pr_text_len = len(pr_text)
+        use_partial = pr_text_len > 100
+
         best_sim = 0.0
         best_defendant = None
-
-        pr_text_len = len(pr_text)
-        use_partial = (
-            pr_text_len > 100
-        )  # Use partial matching for texts longer than 100 chars
+        best_matched_text = None
 
         for defendant_name in defendants_to_try:
             defendant_norm = normalize_nepali(defendant_name)
-            if defendant_norm and pr_text:
-                if use_partial:
-                    # For longer texts, find the defendant name within the text
-                    sim = fuzz.partial_ratio(defendant_norm, pr_text) / 100.0
-                else:
-                    # For very short texts, use token_set_ratio
-                    sim = fuzz.token_set_ratio(defendant_norm, pr_text) / 100.0
-                if sim > best_sim:
-                    best_sim = sim
-                    best_defendant = defendant_name
+            name_parts = defendant_name.strip().split()
 
-        if best_sim >= 0.50:  # Lowered threshold to catch spelling variations
-            score = best_sim  # Full score based on name similarity
+            # REJECT: Very short names (< 4 chars)
+            if len(defendant_norm) < 4:
+                continue
+
+            # REJECT: Single-word surname-only unless long/unique (>= 8 chars)
+            if self._is_surname_only_match(defendant_name) and len(defendant_norm) < 8:
+                continue
+
+            if not (defendant_norm and pr_text):
+                continue
+
+            if use_partial:
+                sim = fuzz.partial_ratio(defendant_norm, pr_text) / 100.0
+
+                # VALIDATE: For multi-word names, require first word (first name) also present in PR
+                if sim > 0 and len(name_parts) >= 2:
+                    first_name_norm = normalize_nepali(name_parts[0])
+                    if len(first_name_norm) >= 3:
+                        first_name_in_pr = (
+                            fuzz.partial_ratio(first_name_norm, pr_text) / 100.0
+                        )
+                        if first_name_in_pr < 0.7:
+                            # First name not found in PR — likely a surname-only match, penalize heavily
+                            sim *= 0.4
+
+                    # VALIDATE: Surname (last word) must also appear in PR
+                    surname_norm = normalize_nepali(name_parts[-1])
+                    if len(surname_norm) >= 3:
+                        surname_in_pr = (
+                            fuzz.partial_ratio(surname_norm, pr_text) / 100.0
+                        )
+                        if surname_in_pr < 0.7:
+                            # Surname not found — penalize heavily
+                            sim *= 0.4
+
+            else:
+                sim = fuzz.token_set_ratio(defendant_norm, pr_text) / 100.0
+
+            # PENALIZE: Surname-only matches
+            if self._is_surname_only_match(defendant_name):
+                sim *= 0.7
+
+            if sim > best_sim:
+                best_sim = sim
+                best_defendant = defendant_name
+                # Extract matched text AFTER we know this is the best match
+                if use_partial:
+                    # Find the actual matched substring in original PR text
+                    pr_combined_original = pr_title + (
+                        " " + pr_full_text if pr_full_text else ""
+                    )
+                    # Use a larger window and finer step for better extraction
+                    window = max(len(defendant_name) * 3, 50)
+                    step = max(5, len(defendant_name) // 2)
+                    from rapidfuzz import process
+
+                    result = process.extractOne(
+                        defendant_name,
+                        [
+                            pr_combined_original[i : i + window]
+                            for i in range(
+                                0, max(1, len(pr_combined_original) - window + 1), step
+                            )
+                        ],
+                        scorer=fuzz.partial_ratio,
+                    )
+                    if result:
+                        best_matched_text = result[0].strip()
+                else:
+                    best_matched_text = pr_title
+
+        # REJECT: matched text too short (< 20 chars) — likely a surname fragment
+        if best_matched_text and len(best_matched_text.strip()) < 20:
+            logger.debug(
+                f"PR #{pr.get('press_id')}: Rejected - matched text too short ({len(best_matched_text.strip())} chars): '{best_matched_text.strip()}'"
+            )
+            return 0.0, []
+
+        if best_sim >= 0.50:
+            score = best_sim
             signals.append(f"defendant_name_similarity({best_sim:.2f})")
             if best_defendant:
                 signals.append(f"matched_defendant:{best_defendant}")
+            if best_matched_text:
+                signals.append(f"pr_matched_text:{best_matched_text}")
+            logger.debug(
+                f"PR #{pr.get('press_id')}: Score {best_sim:.2f}, defendant: {best_defendant}"
+            )
 
         return score, signals
 
@@ -248,82 +435,104 @@ class MatchingEngine:
         all_defendants: Optional[list[dict]] = None,
         defer_llm: bool = False,
     ) -> tuple[list[PressReleaseRecord], float, list[str], Optional[dict]]:
-        """Return the best-matching press release within ±2 days of case registration."""
+        """
+        Score ALL candidate groups (same_day, ±1, ±2, undated), pick the highest
+        score overall. Date proximity is used as a tiebreaker signal only.
+        Undated PRs require a higher threshold (0.75) since there's no date validation.
+        """
         candidates = self._candidates(case.registration_date_bs or "")
         case_date = case.registration_date_bs or ""
 
-        # Filter candidates by date range: ±2 days from registration
-        valid_candidates = []
+        # Bucket candidates by date proximity
+        same_day, one_day, two_day, undated = [], [], [], []
         for pr in candidates:
             pr_date = pr.get("publication_date") or ""
-            if _is_within_date_range(case_date, pr_date):
-                valid_candidates.append(pr)
+            if not pr_date:
+                undated.append(pr)
+                continue
+            day_diff = _calculate_day_difference(case_date, pr_date)
+            if day_diff is None:
+                undated.append(pr)
+            elif day_diff == 0:
+                same_day.append(pr)
+            elif day_diff == 1:
+                one_day.append(pr)
+            elif day_diff == 2:
+                two_day.append(pr)
 
-        if not valid_candidates:
+        candidate_groups = [
+            (same_day, "same_day"),
+            (one_day, "±1_day"),
+            (two_day, "±2_days"),
+            (undated, "undated"),
+        ]
+
+        # Score ALL groups and collect every match
+        all_scored: list[tuple[float, dict, list[str], str]] = (
+            []
+        )  # (score, pr, signals, group)
+        for group, group_label in candidate_groups:
+            for pr in group:
+                score, signals = self._score_press_release(case, pr, all_defendants)
+                if score > 0:
+                    all_scored.append(
+                        (
+                            score,
+                            pr,
+                            signals + [f"date_match:{group_label}"],
+                            group_label,
+                        )
+                    )
+
+        if not all_scored:
             return [], 0.0, [], None
 
-        # Score all valid candidates
-        scored_candidates = []
-        for pr in valid_candidates:
-            score, signals = self._score_press_release(case, pr, all_defendants)
-            if score > 0:  # Only keep candidates with some score
-                scored_candidates.append((score, pr, signals))
+        # Sort by score descending, pick the best overall
+        all_scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_pr, best_signals, best_group = all_scored[0]
 
-        # Sort by score descending
-        scored_candidates.sort(key=lambda x: x[0], reverse=True)
-
-        if not scored_candidates:
+        # Apply group-specific minimum thresholds
+        min_threshold = (
+            UNDATED_CONFIRMED_THRESHOLD
+            if best_group == "undated"
+            else CONFIRMED_THRESHOLD
+        )
+        if best_score < min_threshold:
+            # Below threshold — route to LLM if requested
+            if defer_llm and all_defendants:
+                top_candidates = [pr for _, pr, _, _ in all_scored[:5]]
+                all_defendant_names = [
+                    d["name"] for d in all_defendants if d.get("name")
+                ]
+                llm_defer_data = {
+                    "defendant_names": all_defendant_names,
+                    "press_release_candidates": top_candidates,
+                    "scored_candidates": [(s, p, sig) for s, p, sig, _ in all_scored],
+                }
+                return [], best_score, best_signals, llm_defer_data
             return [], 0.0, [], None
 
-        best_score, best_pr, best_signals = scored_candidates[0]
-
-        # LLM verification for non-high-confidence matches
-        # Only defer if caller requested it and score is in review range
-        if (
-            defer_llm
-            and all_defendants
-            and NEEDS_REVIEW_THRESHOLD <= best_score < CONFIRMED_THRESHOLD
-        ):
-            # Get top 5 candidates for batch verification
-            top_candidates = [pr for _, pr, _ in scored_candidates[:5]]
-
-            # Extract all defendant names
+        # Route to LLM if below CONFIRMED_THRESHOLD (only for dated PRs)
+        if defer_llm and all_defendants and best_score < CONFIRMED_THRESHOLD:
+            top_candidates = [pr for _, pr, _, _ in all_scored[:5]]
             all_defendant_names = [d["name"] for d in all_defendants if d.get("name")]
-
-            # Return data for batch processing
             llm_defer_data = {
                 "defendant_names": all_defendant_names,
                 "press_release_candidates": top_candidates,
-                "scored_candidates": scored_candidates,
+                "scored_candidates": [(s, p, sig) for s, p, sig, _ in all_scored],
             }
             return [], best_score, best_signals, llm_defer_data
 
-        # High confidence (>= 0.7): return best match
-        if best_score >= 0.7:
-            matched = [
-                PressReleaseRecord(
-                    release_id=int(best_pr.get("press_id") or 0),
-                    url=best_pr.get("source_url") or "",
-                    r2_metadata_url=None,
-                    date=best_pr.get("publication_date") or "",
-                    title=best_pr.get("title") or "",
-                )
-            ]
-            return matched, best_score, best_signals, None
-        elif best_pr and best_score >= NEEDS_REVIEW_THRESHOLD:
-            # Return only best match for medium confidence
-            matched = [
-                PressReleaseRecord(
-                    release_id=int(best_pr.get("press_id") or 0),
-                    url=best_pr.get("source_url") or "",
-                    r2_metadata_url=None,
-                    date=best_pr.get("publication_date") or "",
-                    title=best_pr.get("title") or "",
-                )
-            ]
-            return matched, best_score, best_signals, None
-
-        return [], 0.0, [], None
+        matched = [
+            PressReleaseRecord(
+                release_id=int(best_pr.get("press_id") or 0),
+                url=best_pr.get("source_url") or "",
+                r2_metadata_url=None,
+                date=best_pr.get("publication_date") or "",
+                title=best_pr.get("title") or "",
+            )
+        ]
+        return matched, best_score, best_signals, None
 
     def _match_charge_sheet(
         self, case: CourtCase
@@ -379,7 +588,7 @@ class MatchingEngine:
         if confidence >= CONFIRMED_THRESHOLD:
             status = "confirmed"
             unmatched_reason = None
-        elif confidence >= NEEDS_REVIEW_THRESHOLD:
+        elif confidence > NEEDS_REVIEW_THRESHOLD:
             status = "needs_review"
             unmatched_reason = None
         else:

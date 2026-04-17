@@ -33,6 +33,25 @@ def _current_fiscal_year() -> int:
     return bs_year
 
 
+def _format_fiscal_year(fiscal_year: int) -> str:
+    """
+    Format fiscal year as dash-separated form.
+
+    Args:
+        fiscal_year: BS fiscal year integer (e.g. 2080)
+
+    Returns:
+        Formatted string (e.g. "2080-81")
+
+    Example:
+        2080 -> "2080-81"
+        2059 -> "2059-60"
+    """
+    year_str = str(fiscal_year)
+    next_year_last_two = str(int(year_str[-2:]) + 1).zfill(2)
+    return f"{fiscal_year}-{next_year_last_two}"
+
+
 def run_fiscal_year(
     fiscal_year: int,
     ag_index_path: str,
@@ -48,7 +67,7 @@ def run_fiscal_year(
     from ngm.ciaa_dataset.writer import FileWriter
     from ngm.ciaa_dataset.models import PressReleaseRecord
 
-    fy_str = str(fiscal_year)
+    fy_str = _format_fiscal_year(fiscal_year)
     logger.info("=== Processing fiscal year %s ===", fy_str)
 
     # Provide default path if not specified
@@ -92,6 +111,10 @@ def run_fiscal_year(
     total_cases = len(court_cases)
     logger.info("Phase 1: Processing %d cases...", total_cases)
 
+    # Track appeal statistics
+    appeals_from_db = 0
+    appeals_from_csv = 0
+
     for idx, case in enumerate(court_cases, 1):
         # Log progress every 10 cases
         if idx % 10 == 0 or idx == total_cases:
@@ -99,13 +122,26 @@ def run_fiscal_year(
 
         # Resolve appeal
         appeal = None
+        appeal_info_from_csv = None
         if case.case_number in punaravedan_index:
-            appeal_info = punaravedan_index[case.case_number]
-            supreme_case_no = appeal_info["supreme_case_number"]
+            appeal_info_from_csv = punaravedan_index[case.case_number]
+            supreme_case_no = appeal_info_from_csv["supreme_case_number"]
+
+            # Try to load from database first
             appeal = loader.load_supreme_court_case(supreme_case_no)
+
             if appeal:
-                logger.info(
-                    "[%s] Found appeal: %s",
+                appeals_from_db += 1
+                logger.debug(
+                    "[%s] Found appeal in DB: %s",
+                    case.case_number,
+                    supreme_case_no,
+                )
+            else:
+                # DB case doesn't exist, but we have CSV info
+                appeals_from_csv += 1
+                logger.debug(
+                    "[%s] Appeal filed (CSV only): %s",
                     case.case_number,
                     supreme_case_no,
                 )
@@ -118,7 +154,13 @@ def run_fiscal_year(
         # Match with defer_llm=True to collect LLM verification data
         match = engine.match(case, all_defendants=defendants, defer_llm=True)
 
-        preliminary_matches[case.case_number] = (case, match, appeal, defendants)
+        preliminary_matches[case.case_number] = (
+            case,
+            match,
+            appeal,
+            appeal_info_from_csv,
+            defendants,
+        )
 
         # Check if LLM verification is needed
         if hasattr(match, "llm_defer_data") and match.llm_defer_data:
@@ -133,11 +175,19 @@ def run_fiscal_year(
                 }
             )
 
+    # Log Phase 1 summary
+    logger.info(
+        "Phase 1 complete: Appeals resolved - %d from DB, %d from CSV",
+        appeals_from_db,
+        appeals_from_csv,
+    )
+
     # Phase 2: Batch LLM verification (ONE call for all cases)
     llm_results = {}
     if cases_needing_llm:
         logger.info(
-            "Running batch LLM verification for %d cases", len(cases_needing_llm)
+            "Phase 2: Running batch LLM verification for %d cases",
+            len(cases_needing_llm),
         )
         try:
             from ngm.ciaa_dataset.llm_verifier import LLMVerifier
@@ -145,16 +195,26 @@ def run_fiscal_year(
             verifier = LLMVerifier()
             llm_results = verifier.verify_multi_case_batch(cases_needing_llm)
             logger.info(
-                "Batch LLM verification completed: %d results", len(llm_results)
+                "Phase 2 complete: %d LLM verifications completed", len(llm_results)
             )
         except Exception as e:
             logger.error("Batch LLM verification failed: %s", e)
 
     # Phase 3: Apply LLM results and build final cases
-    for case_number, (case, match, appeal, defendants) in preliminary_matches.items():
+    logger.info("Phase 3: Building final case records...")
+    for case_number, (
+        case,
+        match,
+        appeal,
+        appeal_info_from_csv,
+        defendants,
+    ) in preliminary_matches.items():
         # Apply LLM result if available
         if case_number in llm_results:
             matched_press_id, llm_confidence, explanation = llm_results[case_number]
+
+            # Distinguish LLM error (transient) from intentional rejection
+            is_llm_error = explanation.startswith("llm_error:")
 
             if matched_press_id:
                 # Find the matched PR from defer data
@@ -204,13 +264,52 @@ def run_fiscal_year(
                         explanation,
                     )
             else:
-                # LLM rejected all candidates
-                match.match_signals.append("llm_multi_case_batch_rejected")
-                logger.info(
-                    "[%s] LLM multi-case batch rejected all candidates: %s",
-                    case_number,
-                    explanation,
-                )
+                if is_llm_error:
+                    # Transient error — keep fuzzy match result as needs_review for human review
+                    match.match_status = "needs_review"
+                    match.match_signals.append("llm_unavailable")
+                    logger.warning(
+                        "[%s] LLM unavailable, keeping fuzzy match as needs_review: %s",
+                        case_number,
+                        explanation,
+                    )
+                else:
+                    # LLM intentionally rejected all candidates — downgrade to unmatched
+                    match.press_releases = []
+                    match.match_status = "unmatched"
+                    match.unmatched_reason = "LLM rejected all candidates"
+                    # Strip misleading signals from unmatched cases
+                    match.match_signals = [
+                        s
+                        for s in match.match_signals
+                        if not s.startswith("pr_matched_text:")
+                        and not s.startswith("date_match:")
+                        and not s.startswith("defendant_name_similarity")
+                        and not s.startswith("matched_defendant:")
+                    ]
+                    match.match_signals.append("llm_multi_case_batch_rejected")
+                    logger.info(
+                        "[%s] LLM multi-case batch rejected all candidates: %s",
+                        case_number,
+                        explanation,
+                    )
+
+        # Safety check: confirmed/needs_review with no press releases is invalid
+        if (
+            match.match_status in ("confirmed", "needs_review")
+            and not match.press_releases
+            and not match.charge_sheets
+        ):
+            match.match_status = "unmatched"
+            match.unmatched_reason = "No press release or charge sheet populated"
+            match.match_signals = [
+                s
+                for s in match.match_signals
+                if not s.startswith("pr_matched_text:")
+                and not s.startswith("date_match:")
+                and not s.startswith("defendant_name_similarity")
+                and not s.startswith("matched_defendant:")
+            ]
 
         # Track stats
         if match.match_status == "confirmed":
@@ -226,6 +325,7 @@ def run_fiscal_year(
             match=match,
             fiscal_year=fiscal_year,
             appeal=appeal,
+            appeal_info_from_csv=appeal_info_from_csv,
             defendants=defendants or None,
         )
 

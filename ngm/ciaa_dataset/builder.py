@@ -16,6 +16,25 @@ from ngm.ciaa_dataset.models import (
 from ngm.ciaa_dataset.matcher import MatchResult
 
 
+def _format_fiscal_year(fiscal_year: int) -> str:
+    """
+    Format fiscal year as dash-separated form.
+
+    Args:
+        fiscal_year: BS fiscal year integer (e.g. 2080)
+
+    Returns:
+        Formatted string (e.g. "2080-81")
+
+    Example:
+        2080 -> "2080-81"
+        2059 -> "2059-60"
+    """
+    year_str = str(fiscal_year)
+    next_year_last_two = str(int(year_str[-2:]) + 1).zfill(2)
+    return f"{fiscal_year}-{next_year_last_two}"
+
+
 def _court_order_urls(case: CourtCase) -> list[str]:
     """Extract court order file URLs from extra_data and prepend base URL."""
     if not case.extra_data:
@@ -43,6 +62,7 @@ class CIAACaseBuilder:
         match: MatchResult,
         fiscal_year: int,
         appeal: Optional[CourtCase] = None,
+        appeal_info_from_csv: Optional[dict] = None,
         defendants: Optional[list[dict]] = None,
     ) -> CIAACase:
         """
@@ -52,11 +72,12 @@ class CIAACaseBuilder:
             case: The Special Court CourtCase DB row.
             match: Output of MatchingEngine.match().
             fiscal_year: BS fiscal year integer (e.g. 2080).
-            appeal: Optional Supreme Court CourtCase for the appeal.
+            appeal: Optional Supreme Court CourtCase for the appeal (from DB).
+            appeal_info_from_csv: Optional appeal info from punaravedan.csv when DB case doesn't exist.
             defendants: Optional structured defendant list from court_case_entities.
                         Falls back to parsing case.defendant text if not provided.
         """
-        fy_str = str(fiscal_year)
+        fy_str = _format_fiscal_year(fiscal_year)
 
         # Defendants from database; fallback to parsing case.defendant text
         if defendants:
@@ -90,6 +111,7 @@ class CIAACaseBuilder:
 
         appeal_record = None
         if appeal:
+            # Full appeal data from database
             appeal_record = CourtCaseRecord(
                 court=appeal.court_identifier or "supreme",
                 case_no=appeal.case_number,
@@ -104,6 +126,17 @@ class CIAACaseBuilder:
                     "faisala" if "फैसला" in (appeal.case_status or "") else "ongoing"
                 ),
                 faisala_link=_court_order_urls(appeal),
+            )
+        elif appeal_info_from_csv:
+            # Minimal appeal data from punaravedan.csv (DB case doesn't exist yet)
+            appeal_record = CourtCaseRecord(
+                court="supreme",
+                case_no=appeal_info_from_csv["supreme_case_number"],
+                registration_date_bs=appeal_info_from_csv.get("appeal_filing_date"),
+                registration_date_ad=None,
+                defendants=[],
+                current_status="appeal_filed",  # Status indicating appeal was filed but not yet in DB
+                faisala_link=[],
             )
 
         meta = CaseMeta(

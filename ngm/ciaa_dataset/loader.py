@@ -202,17 +202,33 @@ class DataLoader:
 
         index: dict[str, dict] = {}
         with open(punaravedan_path, encoding="utf-8") as f:
+            # Skip first two lines (blank line and title row)
+            next(f)
+            next(f)
             reader = csv.DictReader(f)
             for row in reader:
                 # CSV columns are in Nepali
-                special_case = (row.get("विशेष_अदालतको_मुद्दा_नं") or "").strip()
+                special_case_raw = (row.get("विशेष_अदालतको_मुद्दा_नं") or "").strip()
                 supreme_case = (row.get("सर्वोच्च_अदालतको_मुद्दा_नं") or "").strip()
                 faisala_date = (row.get("विशेष_अदालतको_फैसला_मिति") or "").strip()
+                appeal_decision_date = (
+                    row.get("आयोगको_पुनरावेदन_गर्ने_निर्णय_मिति") or ""
+                ).strip()
+                appeal_filing_date = (row.get("पुनरावेदन_दर्ता_मिति") or "").strip()
 
-                if special_case and supreme_case:
+                # Handle multiple case numbers (take first one)
+                if special_case_raw and supreme_case:
+                    special_case = (
+                        special_case_raw.split()[0]
+                        if special_case_raw.split()
+                        else special_case_raw
+                    )
+
                     index[special_case] = {
                         "supreme_case_number": supreme_case,
                         "faisala_date": faisala_date,
+                        "appeal_decision_date": appeal_decision_date,
+                        "appeal_filing_date": appeal_filing_date,
                     }
 
         logger.info("Loaded %d appeal mappings from punaravedan.csv", len(index))
