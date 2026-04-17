@@ -213,8 +213,14 @@ def run_fiscal_year(
         if case_number in llm_results:
             matched_press_id, llm_confidence, explanation = llm_results[case_number]
 
-            # Distinguish LLM error (transient) from intentional rejection
-            is_llm_error = explanation.startswith("llm_error:")
+            # Distinguish LLM error (transient) from intentional rejection.
+            # Match all error prefixes emitted by the verifier regardless of case.
+            expl_lower = (explanation or "").lower()
+            is_llm_error = (
+                expl_lower.startswith("llm_error:")
+                or expl_lower.startswith("llm error:")
+                or expl_lower.startswith("json parse error:")
+            )
 
             if matched_press_id:
                 # Find the matched PR from defer data

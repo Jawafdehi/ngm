@@ -256,13 +256,13 @@ Answer with JSON only (no other text):
         except json.JSONDecodeError as e:
             logger.error("Failed to parse LLM batch response: %s", e)
             return {
-                case["case_number"]: (None, 0.0, f"JSON parse error: {e}")
+                case["case_number"]: (None, 0.0, f"llm_error: JSON parse error: {e}")
                 for case in cases
             }
         except Exception as e:
             logger.error("LLM batch verification failed: %s", e)
             return {
-                case["case_number"]: (None, 0.0, f"LLM error: {e}") for case in cases
+                case["case_number"]: (None, 0.0, f"llm_error: {e}") for case in cases
             }
 
     def verify_multi_case_batch(
