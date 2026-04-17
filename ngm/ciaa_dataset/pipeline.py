@@ -197,8 +197,19 @@ def run_fiscal_year(
             logger.info(
                 "Phase 2 complete: %d LLM verifications completed", len(llm_results)
             )
+        except ValueError as e:
+            # LLM misconfiguration (missing env vars, invalid model)
+            logger.error(
+                "LLM configuration error for %d cases; continuing without LLM verification: %s",
+                len(cases_needing_llm),
+                e,
+            )
         except Exception as e:
-            logger.error("Batch LLM verification failed: %s", e)
+            logger.error(
+                "Batch LLM verification failed for %d cases; continuing without LLM signal: %s",
+                len(cases_needing_llm),
+                e,
+            )
 
     # Phase 3: Apply LLM results and build final cases
     logger.info("Phase 3: Building final case records...")

@@ -512,17 +512,6 @@ class MatchingEngine:
                 return [], best_score, best_signals, llm_defer_data
             return [], 0.0, [], None
 
-        # Route to LLM if below CONFIRMED_THRESHOLD (only for dated PRs)
-        if defer_llm and all_defendants and best_score < CONFIRMED_THRESHOLD:
-            top_candidates = [pr for _, pr, _, _ in all_scored[:5]]
-            all_defendant_names = [d["name"] for d in all_defendants if d.get("name")]
-            llm_defer_data = {
-                "defendant_names": all_defendant_names,
-                "press_release_candidates": top_candidates,
-                "scored_candidates": [(s, p, sig) for s, p, sig, _ in all_scored],
-            }
-            return [], best_score, best_signals, llm_defer_data
-
         matched = [
             PressReleaseRecord(
                 release_id=int(best_pr.get("press_id") or 0),

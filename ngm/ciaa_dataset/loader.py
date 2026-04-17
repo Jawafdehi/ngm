@@ -22,16 +22,23 @@ class DataLoader:
         self,
         ag_index_path: str,
         press_releases_csv_path: str,
+        punaravedan_csv_path: Optional[str] = None,
         database_url: Optional[str] = None,
     ):
         """
         Args:
             ag_index_path: Path to ag_index.csv.
             press_releases_csv_path: Path to ciaa-press-releases.csv.
+            punaravedan_csv_path: Path to punaravedan.csv. Defaults to package-relative path.
             database_url: PostgreSQL connection string. Falls back to DATABASE_URL env var.
         """
         self.ag_index_path = Path(ag_index_path)
         self.press_releases_csv_path = Path(press_releases_csv_path)
+        self.punaravedan_csv_path = (
+            Path(punaravedan_csv_path)
+            if punaravedan_csv_path
+            else Path(__file__).parent / "data" / "punaravedan.csv"
+        )
         self._engine = get_engine(database_url)
 
     def _session(self) -> Session:
@@ -195,13 +202,12 @@ class DataLoader:
 
         Returns dict keyed by Special Court case number with Supreme Court case info.
         """
-        punaravedan_path = Path("ngm/ciaa_dataset/data/punaravedan.csv")
-        if not punaravedan_path.exists():
-            logger.warning("punaravedan.csv not found at %s", punaravedan_path)
+        if not self.punaravedan_csv_path.exists():
+            logger.warning("punaravedan.csv not found at %s", self.punaravedan_csv_path)
             return {}
 
         index: dict[str, dict] = {}
-        with open(punaravedan_path, encoding="utf-8") as f:
+        with open(self.punaravedan_csv_path, encoding="utf-8") as f:
             # Skip first two lines (blank line and title row)
             next(f)
             next(f)
