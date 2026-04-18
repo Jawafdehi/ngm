@@ -31,7 +31,7 @@ def _format_fiscal_year(fiscal_year: int) -> str:
         2059 -> "2059-60"
     """
     year_str = str(fiscal_year)
-    next_year_last_two = str(int(year_str[-2:]) + 1).zfill(2)
+    next_year_last_two = f"{(int(year_str[-2:]) + 1) % 100:02d}"
     return f"{fiscal_year}-{next_year_last_two}"
 
 

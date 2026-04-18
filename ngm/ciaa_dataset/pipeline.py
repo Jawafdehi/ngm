@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -24,13 +25,9 @@ EARLIEST_FISCAL_YEAR = 2059
 
 def _current_fiscal_year() -> int:
     """Return the current BS fiscal year based on today's date (approximate)."""
-    # Nepal FY starts mid-July (Shrawan). Use a rough AD offset.
-    now = datetime.now(timezone.utc)
-    # BS year ≈ AD year + 56/57; FY starts ~July 16
-    bs_year = now.year + 56
-    if now.month < 7 or (now.month == 7 and now.day < 16):
-        bs_year -= 1
-    return bs_year
+    # Nepal FY starts mid-July (Shrawan). Use Nepal timezone for accuracy near the boundary.
+    now = datetime.now(ZoneInfo("Asia/Kathmandu"))
+    return now.year + (57 if (now.month, now.day) >= (7, 16) else 56)
 
 
 def _format_fiscal_year(fiscal_year: int) -> str:
@@ -48,7 +45,7 @@ def _format_fiscal_year(fiscal_year: int) -> str:
         2059 -> "2059-60"
     """
     year_str = str(fiscal_year)
-    next_year_last_two = str(int(year_str[-2:]) + 1).zfill(2)
+    next_year_last_two = f"{(int(year_str[-2:]) + 1) % 100:02d}"
     return f"{fiscal_year}-{next_year_last_two}"
 
 
