@@ -151,6 +151,20 @@ def run_fiscal_year(
         # Load defendants
         defendants = loader.load_defendants(case.case_number, case.court_identifier)
 
+        # Load plaintiffs
+        plaintiffs = loader.load_plaintiffs(case.case_number, case.court_identifier)
+
+        # Load appeal defendants and plaintiffs if appeal exists
+        appeal_defendants = None
+        appeal_plaintiffs = None
+        if appeal:
+            appeal_defendants = loader.load_defendants(
+                appeal.case_number, appeal.court_identifier
+            )
+            appeal_plaintiffs = loader.load_plaintiffs(
+                appeal.case_number, appeal.court_identifier
+            )
+
         # Match with defer_llm=True to collect LLM verification data
         match = engine.match(case, all_defendants=defendants, defer_llm=True)
 
@@ -160,6 +174,9 @@ def run_fiscal_year(
             appeal,
             appeal_info_from_csv,
             defendants,
+            plaintiffs,
+            appeal_defendants,
+            appeal_plaintiffs,
         )
 
         # Check if LLM verification is needed
@@ -219,6 +236,9 @@ def run_fiscal_year(
         appeal,
         appeal_info_from_csv,
         defendants,
+        plaintiffs,
+        appeal_defendants,
+        appeal_plaintiffs,
     ) in preliminary_matches.items():
         # Apply LLM result if available
         if case_number in llm_results:
@@ -348,6 +368,9 @@ def run_fiscal_year(
             appeal=appeal,
             appeal_info_from_csv=appeal_info_from_csv,
             defendants=defendants or None,
+            plaintiffs=plaintiffs or None,
+            appeal_defendants=appeal_defendants or None,
+            appeal_plaintiffs=appeal_plaintiffs or None,
         )
 
         # Write

@@ -134,6 +134,35 @@ class DataLoader:
         finally:
             session.close()
 
+    def load_plaintiffs(self, case_number: str, court_identifier: str) -> list[dict]:
+        """Load structured plaintiff records from court_case_entities table."""
+        session = self._session()
+        try:
+            with session.begin():
+                entities = (
+                    session.query(CaseEntity)
+                    .filter(
+                        CaseEntity.case_number == case_number,
+                        CaseEntity.court_identifier == court_identifier,
+                        CaseEntity.side == "plaintiff",
+                    )
+                    .all()
+                )
+
+                result = []
+                for e in entities:
+                    # Split comma-separated names (some rows have multiple plaintiffs in one field)
+                    if "," in e.name:
+                        names = [n.strip() for n in e.name.split(",") if n.strip()]
+                        for name in names:
+                            result.append({"name": name})
+                    else:
+                        result.append({"name": e.name})
+
+                return result
+        finally:
+            session.close()
+
     def load_press_release_index(self) -> list[dict]:
         """
         Load the CIAA press release index from CSV.

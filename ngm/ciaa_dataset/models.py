@@ -12,8 +12,11 @@ class CourtCaseRecord(BaseModel):
     registration_date_bs: Optional[str] = None
     registration_date_ad: Optional[str] = None
     defendants: list[Defendant] = []
+    plaintiffs: list[Defendant] = []
     current_status: Optional[str] = None
     faisala_link: list[str] = []
+    faisala_date_bs: Optional[str] = None
+    faisala_date_ad: Optional[str] = None
 
 
 class PressReleaseRecord(BaseModel):

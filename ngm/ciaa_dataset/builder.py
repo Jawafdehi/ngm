@@ -44,6 +44,25 @@ def _court_order_urls(case: CourtCase) -> list[str]:
     return [f"{base_url}{p}" for p in paths if p]
 
 
+def _extract_faisala_date_from_status(case_status: Optional[str]) -> Optional[str]:
+    """
+    Extract faisala date from case_status field.
+
+    Example: "फैसला (मिती: २०८२/०४/२८)" -> "२०८२/०४/२८"
+    """
+    if not case_status:
+        return None
+
+    # Look for pattern: मिती: followed by date
+    import re
+
+    match = re.search(r"मिती:\s*([०-९०-९/]+)", case_status)
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
 def _derive_title(match: MatchResult, case: CourtCase) -> str:
     """Use first matched press release title, fall back to defendant names."""
     if match.press_releases:
@@ -64,6 +83,9 @@ class CIAACaseBuilder:
         appeal: Optional[CourtCase] = None,
         appeal_info_from_csv: Optional[dict] = None,
         defendants: Optional[list[dict]] = None,
+        plaintiffs: Optional[list[dict]] = None,
+        appeal_defendants: Optional[list[dict]] = None,
+        appeal_plaintiffs: Optional[list[dict]] = None,
     ) -> CIAACase:
         """
         Build a CIAACase from a CourtCase + MatchResult.
@@ -76,6 +98,10 @@ class CIAACaseBuilder:
             appeal_info_from_csv: Optional appeal info from punaravedan.csv when DB case doesn't exist.
             defendants: Optional structured defendant list from court_case_entities.
                         Falls back to parsing case.defendant text if not provided.
+            plaintiffs: Optional structured plaintiff list from court_case_entities.
+                        Falls back to parsing case.plaintiff text if not provided.
+            appeal_defendants: Optional structured defendant list for appeal case.
+            appeal_plaintiffs: Optional structured plaintiff list for appeal case.
         """
         fy_str = _format_fiscal_year(fiscal_year)
 
@@ -93,9 +119,29 @@ class CIAACaseBuilder:
             parsed = [n.strip() for n in re.split(r"[,;|/]+", raw) if n.strip()]
             defendant_objs = [Defendant(name=n) for n in parsed]
 
+        # Plaintiffs from database; fallback to parsing case.plaintiff text
+        if plaintiffs:
+            plaintiff_objs = [
+                Defendant(name=p["name"]) for p in plaintiffs if p.get("name")
+            ]
+        else:
+            # Fallback: parse case.plaintiff text
+            raw = (case.plaintiff or "").strip()
+            # Split on common separators: comma, semicolon, pipe, slash
+            # Remove "समेत" suffix if present
+            raw = raw.split("समेत")[0].strip()
+            parsed = [n.strip() for n in re.split(r"[,;|/]+", raw) if n.strip()]
+            plaintiff_objs = [Defendant(name=n) for n in parsed]
+
         # Determine current_status
         status = case.case_status or ""
         is_faisala = "फैसला" in status
+
+        # Extract faisala date from case_status if verdict_date fields are null
+        faisala_date_bs = case.verdict_date_bs or _extract_faisala_date_from_status(
+            status
+        )
+        faisala_date_ad = str(case.verdict_date_ad) if case.verdict_date_ad else None
 
         court_case_record = CourtCaseRecord(
             court=case.court_identifier or "special",
@@ -105,13 +151,46 @@ class CIAACaseBuilder:
                 str(case.registration_date_ad) if case.registration_date_ad else None
             ),
             defendants=defendant_objs,
+            plaintiffs=plaintiff_objs,
             current_status="faisala" if is_faisala else "ongoing",
             faisala_link=_court_order_urls(case),
+            faisala_date_bs=faisala_date_bs,
+            faisala_date_ad=faisala_date_ad,
         )
 
         appeal_record = None
         if appeal:
             # Full appeal data from database
+            appeal_status = appeal.case_status or ""
+            is_appeal_faisala = "फैसला" in appeal_status
+
+            # Extract faisala date from appeal case_status if verdict_date fields are null
+            appeal_faisala_date_bs = (
+                appeal.verdict_date_bs
+                or _extract_faisala_date_from_status(appeal_status)
+            )
+            appeal_faisala_date_ad = (
+                str(appeal.verdict_date_ad) if appeal.verdict_date_ad else None
+            )
+
+            # Build appeal defendants list
+            appeal_defendant_objs = []
+            if appeal_defendants:
+                appeal_defendant_objs = [
+                    Defendant(name=d["name"])
+                    for d in appeal_defendants
+                    if d.get("name")
+                ]
+
+            # Build appeal plaintiffs list
+            appeal_plaintiff_objs = []
+            if appeal_plaintiffs:
+                appeal_plaintiff_objs = [
+                    Defendant(name=p["name"])
+                    for p in appeal_plaintiffs
+                    if p.get("name")
+                ]
+
             appeal_record = CourtCaseRecord(
                 court=appeal.court_identifier or "supreme",
                 case_no=appeal.case_number,
@@ -121,11 +200,12 @@ class CIAACaseBuilder:
                     if appeal.registration_date_ad
                     else None
                 ),
-                defendants=[],
-                current_status=(
-                    "faisala" if "फैसला" in (appeal.case_status or "") else "ongoing"
-                ),
+                defendants=appeal_defendant_objs,
+                plaintiffs=appeal_plaintiff_objs,
+                current_status="faisala" if is_appeal_faisala else "ongoing",
                 faisala_link=_court_order_urls(appeal),
+                faisala_date_bs=appeal_faisala_date_bs,
+                faisala_date_ad=appeal_faisala_date_ad,
             )
         elif appeal_info_from_csv:
             # Minimal appeal data from punaravedan.csv (DB case doesn't exist yet)
@@ -135,8 +215,11 @@ class CIAACaseBuilder:
                 registration_date_bs=appeal_info_from_csv.get("appeal_filing_date"),
                 registration_date_ad=None,
                 defendants=[],
-                current_status="appeal_filed",  # Status indicating appeal was filed but not yet in DB
+                plaintiffs=[],
+                current_status="ongoing",  # Status indicating appeal is ongoing
                 faisala_link=[],
+                faisala_date_bs=None,
+                faisala_date_ad=None,
             )
 
         meta = CaseMeta(
