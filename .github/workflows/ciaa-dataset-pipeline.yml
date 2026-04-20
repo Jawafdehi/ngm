@@ -1,0 +1,77 @@
+name: CIAA Dataset Pipeline
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      from_year:
+        description: 'Process all fiscal years from this year up to current (e.g. 2078 for last 5 years).'
+        required: false
+        type: string
+
+env:
+  POETRY_VERSION: '2.3.2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ciaa-dataset-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    environment: 'NGM Scrape'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Resolve pipeline arguments
+        id: args
+        run: |
+          # Use input from_year if provided, otherwise default to 2078 (last 5 years)
+          FROM_YEAR="${{ inputs.from_year }}"
+          if [ -z "$FROM_YEAR" ]; then
+            FROM_YEAR="2078"
+          fi
+          echo "pipeline_args=--from-year $FROM_YEAR" >> "$GITHUB_OUTPUT"
+
+      - name: Run CIAA Dataset Pipeline
+        working-directory: ./ngm
+        run: poetry run python -m ngm.ciaa_dataset.pipeline ${{ steps.args.outputs.pipeline_args }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OUTPUT_DIR: 's3://ngm/uploads/'
+          AWS_ENDPOINT_URL: 'https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: 'auto'
+          # LLM_API_KEY: Google Gemini API key
+          # LLM: model in format google_genai:model-name (e.g. google_genai:gemini-2.0-flash-lite)
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM: ${{ secrets.LLM }} 
