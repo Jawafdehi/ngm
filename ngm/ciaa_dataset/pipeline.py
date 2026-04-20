@@ -19,9 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Earliest fiscal year with CIAA Special Court data
-EARLIEST_FISCAL_YEAR = 2059
-
 
 def _current_fiscal_year() -> int:
     """Return the current BS fiscal year based on today's date (approximate)."""
@@ -407,17 +404,36 @@ def run_fiscal_year(
 def main() -> None:
     parser = argparse.ArgumentParser(description="CIAA Cases Dataset Pipeline")
     parser.add_argument(
-        "--fiscal-year",
+        "--from-year",
         type=int,
         default=None,
-        help="BS fiscal year start (e.g. 2080). Defaults to current year.",
+        metavar="YEAR",
+        help="Process all BS fiscal years from YEAR up to the current year. Defaults to current year only.",
     )
     args = parser.parse_args()
 
-    fiscal_year = args.fiscal_year or _current_fiscal_year()
-    fiscal_years = [fiscal_year]
+    current_fy = _current_fiscal_year()
+
+    if args.from_year:
+        if args.from_year > current_fy:
+            logger.error(
+                "--from-year %d is in the future (current FY is %d)",
+                args.from_year,
+                current_fy,
+            )
+            sys.exit(1)
+        fiscal_years = list(range(args.from_year, current_fy + 1))
+        logger.info(
+            "Processing fiscal years: %d – %d (%d years)",
+            args.from_year,
+            current_fy,
+            len(fiscal_years),
+        )
+    else:
+        fiscal_years = [current_fy]
 
     all_stats = []
+    failed_years = []
     for fy in fiscal_years:
         try:
             stats = run_fiscal_year(
@@ -428,7 +444,10 @@ def main() -> None:
             all_stats.append(stats)
         except Exception as e:
             logger.error("Pipeline failed for fiscal year %d: %s", fy, e)
-            sys.exit(1)
+            failed_years.append(fy)
+            # Continue processing remaining years rather than aborting
+            if len(fiscal_years) == 1:
+                sys.exit(1)
 
     # Summary report
     logger.info("\n=== CIAA Dataset Pipeline Summary ===")
@@ -443,7 +462,12 @@ def main() -> None:
             s.get("write_failures", 0),
             s["written"],
         )
+    if failed_years:
+        logger.error("  FAILED years: %s", ", ".join(str(y) for y in failed_years))
     logger.info("=====================================\n")
+
+    if failed_years:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
