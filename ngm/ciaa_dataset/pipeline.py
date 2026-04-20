@@ -414,7 +414,13 @@ def main() -> None:
 
     current_fy = _current_fiscal_year()
 
-    if args.from_year:
+    if args.from_year is not None:
+        if args.from_year <= 0:
+            logger.error(
+                "--from-year %d is invalid; expected a positive BS fiscal year",
+                args.from_year,
+            )
+            sys.exit(1)
         if args.from_year > current_fy:
             logger.error(
                 "--from-year %d is in the future (current FY is %d)",
@@ -449,8 +455,8 @@ def main() -> None:
                     stats["write_failures"],
                 )
                 failed_years.append(fy)
-        except Exception as e:
-            logger.error("Pipeline failed for fiscal year %d: %s", fy, e)
+        except Exception:
+            logger.exception("Pipeline failed for fiscal year %d", fy)
             failed_years.append(fy)
             # Continue processing remaining years rather than aborting
             if len(fiscal_years) == 1:
