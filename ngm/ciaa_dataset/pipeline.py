@@ -424,7 +424,7 @@ def main() -> None:
             sys.exit(1)
         fiscal_years = list(range(args.from_year, current_fy + 1))
         logger.info(
-            "Processing fiscal years: %d – %d (%d years)",
+            "Processing fiscal years: %d - %d (%d years)",
             args.from_year,
             current_fy,
             len(fiscal_years),
@@ -442,6 +442,13 @@ def main() -> None:
                 press_releases_csv_path="ngm/ciaa_dataset/data/ciaa-press-releases.csv",
             )
             all_stats.append(stats)
+            if stats.get("write_failures", 0) > 0:
+                logger.error(
+                    "Fiscal year %d completed with %d write failures",
+                    fy,
+                    stats["write_failures"],
+                )
+                failed_years.append(fy)
         except Exception as e:
             logger.error("Pipeline failed for fiscal year %d: %s", fy, e)
             failed_years.append(fy)

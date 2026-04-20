@@ -139,12 +139,8 @@ class DataLoader:
                 result = []
                 for e in entities:
                     # Split comma-separated names (some rows have multiple defendants in one field)
-                    if "," in e.name:
-                        result.extend(
-                            {"name": n} for n in e.name.split(",") if n.strip()
-                        )
-                    else:
-                        result.append({"name": e.name})
+                    names = [n.strip() for n in (e.name or "").split(",")]
+                    result.extend({"name": name} for name in names if name)
                 return result
         finally:
             session.close()
