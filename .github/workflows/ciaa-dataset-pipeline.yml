@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       from_year:
-        description: 'Process all fiscal years from this year up to current (e.g. 2078 for last 5 years).'
+        description: 'Starting BS fiscal year (inclusive). Leave empty to default to current FY - 3 (last 4 FYs).'
         required: false
         type: string
 
@@ -24,6 +24,7 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     environment: 'NGM Scrape'
+    timeout-minutes: 220
 
     steps:
       - name: Checkout repository
@@ -49,15 +50,22 @@ jobs:
           key: venv-${{ runner.os }}-${{ env.POETRY_VERSION }}-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
 
       - name: Resolve pipeline arguments
         id: args
         run: |
-          # Use input from_year if provided, otherwise default to 2078 (last 5 years)
+          # Use input from_year if provided, otherwise default to (current FY - 3) for last 4 FYs
           FROM_YEAR="${{ inputs.from_year }}"
           if [ -z "$FROM_YEAR" ]; then
-            FROM_YEAR="2078"
+            FROM_YEAR=$(TZ=Asia/Kathmandu python3 - <<'PY'
+from datetime import datetime
+n = datetime.now()
+fy = n.year + (57 if (n.month, n.day) >= (7, 16) else 56)
+print(fy - 3)
+PY
+)
           fi
           echo "pipeline_args=--from-year $FROM_YEAR" >> "$GITHUB_OUTPUT"
 
@@ -67,11 +75,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OUTPUT_DIR: 's3://ngm/uploads/'
-          AWS_ENDPOINT_URL: 'https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com'
+          AWS_ENDPOINT_URL: ${{ vars.AWS_ENDPOINT_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: 'auto'
           # LLM_API_KEY: Google Gemini API key
           # LLM: model in format google_genai:model-name (e.g. google_genai:gemini-2.0-flash-lite)
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM: ${{ secrets.LLM }} 
+          LLM: ${{ secrets.LLM }}
