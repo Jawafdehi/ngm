@@ -175,16 +175,31 @@ def run_fiscal_year(
 
         # Check if LLM verification is needed
         if hasattr(match, "llm_defer_data") and match.llm_defer_data:
-            cases_needing_llm.append(
-                {
-                    "case_number": case.case_number,
-                    "defendant_names": match.llm_defer_data["defendant_names"],
-                    "press_release_candidates": match.llm_defer_data[
-                        "press_release_candidates"
-                    ],
-                    "scored_candidates": match.llm_defer_data["scored_candidates"],
-                }
-            )
+            defer_data = match.llm_defer_data
+            if "confirmed_primary_pr" in defer_data:
+                # Primary match is confirmed — check secondary PR candidates
+                cases_needing_llm.append(
+                    {
+                        "case_number": case.case_number,
+                        "defendant_names": defer_data["defendant_names"],
+                        "confirmed_primary_pr": defer_data["confirmed_primary_pr"],
+                        "secondary_pr_candidates": defer_data[
+                            "secondary_pr_candidates"
+                        ],
+                    }
+                )
+            else:
+                # Primary match needs LLM verification
+                cases_needing_llm.append(
+                    {
+                        "case_number": case.case_number,
+                        "defendant_names": defer_data["defendant_names"],
+                        "press_release_candidates": defer_data[
+                            "press_release_candidates"
+                        ],
+                        "scored_candidates": defer_data["scored_candidates"],
+                    }
+                )
 
     # Log Phase 1 summary
     logger.info(
@@ -195,16 +210,27 @@ def run_fiscal_year(
 
     # Phase 2: Batch LLM verification (ONE call for all cases)
     llm_results = {}
-    if cases_needing_llm:
+    llm_secondary_results: dict[str, list[int]] = {}
+
+    # Separate cases needing primary match from those needing secondary PR check
+    cases_needing_secondary: list[dict] = []
+    for case_data in cases_needing_llm:
+        if "confirmed_primary_pr" in case_data:
+            cases_needing_secondary.append(case_data)
+    cases_needing_primary = [
+        c for c in cases_needing_llm if "confirmed_primary_pr" not in c
+    ]
+
+    if cases_needing_primary:
         logger.info(
             "Phase 2: Running batch LLM verification for %d cases",
-            len(cases_needing_llm),
+            len(cases_needing_primary),
         )
         try:
             from ngm.ciaa_dataset.llm_verifier import LLMVerifier
 
             verifier = LLMVerifier()
-            llm_results = verifier.verify_multi_case_batch(cases_needing_llm)
+            llm_results = verifier.verify_multi_case_batch(cases_needing_primary)
             logger.info(
                 "Phase 2 complete: %d LLM verifications completed", len(llm_results)
             )
@@ -212,15 +238,38 @@ def run_fiscal_year(
             # LLM misconfiguration (missing env vars, invalid model)
             logger.error(
                 "LLM configuration error for %d cases; continuing without LLM verification: %s",
-                len(cases_needing_llm),
+                len(cases_needing_primary),
                 e,
             )
         except Exception as e:
             logger.error(
                 "Batch LLM verification failed for %d cases; continuing without LLM signal: %s",
-                len(cases_needing_llm),
+                len(cases_needing_primary),
                 e,
             )
+
+    if cases_needing_secondary:
+        logger.info(
+            "Phase 2b: Verifying secondary PRs for %d confirmed cases",
+            len(cases_needing_secondary),
+        )
+        try:
+            from ngm.ciaa_dataset.llm_verifier import LLMVerifier
+
+            verifier = LLMVerifier()
+            llm_secondary_results = verifier.verify_secondary_prs(
+                cases_needing_secondary
+            )
+            logger.info(
+                "Phase 2b complete: secondary PR check done for %d cases",
+                len(llm_secondary_results),
+            )
+        except ValueError as e:
+            logger.error(
+                "LLM configuration error for secondary PR check; skipping: %s", e
+            )
+        except Exception as e:
+            logger.error("Secondary PR LLM verification failed; skipping: %s", e)
 
     # Phase 3: Apply LLM results and build final cases
     logger.info("Phase 3: Building final case records...")
@@ -328,6 +377,39 @@ def run_fiscal_year(
                         case_number,
                         explanation,
                     )
+
+        # Apply secondary PR results (additional PRs for already-confirmed cases)
+        if case_number in llm_secondary_results:
+            additional_ids = llm_secondary_results[case_number]
+            if additional_ids and match.press_releases:
+                defer_data = match.llm_defer_data or {}
+                secondary_candidates = defer_data.get("secondary_pr_candidates", [])
+                existing_ids = {pr.release_id for pr in match.press_releases}
+                for pr_id in additional_ids:
+                    if pr_id in existing_ids:
+                        continue
+                    pr_dict = next(
+                        (
+                            p
+                            for p in secondary_candidates
+                            if int(p.get("press_id") or 0) == pr_id
+                        ),
+                        None,
+                    )
+                    if pr_dict:
+                        match.press_releases.append(
+                            PressReleaseRecord(
+                                release_id=pr_id,
+                                url=pr_dict.get("source_url") or "",
+                                r2_metadata_url=None,
+                                date=pr_dict.get("publication_date") or "",
+                                title=pr_dict.get("title") or "",
+                            )
+                        )
+                        match.match_signals.append(
+                            f"llm_secondary_pr_confirmed:{pr_id}"
+                        )
+                        existing_ids.add(pr_id)
 
         # Safety check: confirmed/needs_review with no press releases is invalid
         if (

@@ -265,6 +265,158 @@ Answer with JSON only (no other text):
                 case["case_number"]: (None, 0.0, f"llm_error: {e}") for case in cases
             }
 
+    def verify_secondary_prs(
+        self,
+        cases: list[dict],
+    ) -> dict[str, list[int]]:
+        """
+        For cases that already have a confirmed primary PR, verify which secondary
+        PR candidates (if any) also belong to the same case.
+
+        Args:
+            cases: List of dicts with keys:
+                - case_number: str
+                - defendant_names: list[str]
+                - confirmed_primary_pr: dict (the already-confirmed PR)
+                - secondary_pr_candidates: list[dict] (PRs to verify)
+
+        Returns:
+            Dict mapping case_number -> list of additional press_ids confirmed by LLM
+        """
+        if not cases:
+            return {}
+
+        cases_text = []
+        for i, case in enumerate(cases):
+            case_num = case["case_number"]
+            defendants = case["defendant_names"]
+            primary = case["confirmed_primary_pr"]
+            candidates = case["secondary_pr_candidates"]
+
+            defendants_text = "\n   ".join(
+                [f"{j+1}. {name}" for j, name in enumerate(defendants)]
+            )
+            primary_text = f"PR {primary.get('press_id')}: {primary.get('title', '')}"
+            candidates_text = "\n   ".join(
+                [
+                    f"{j+1}. PR {pr.get('press_id')}: {pr.get('title', '')} {((pr.get('full_text') or '').strip())[:400]}"
+                    for j, pr in enumerate(candidates)
+                ]
+            )
+
+            cases_text.append(
+                f"""Case {i+1}: {case_num}
+   Defendants:
+   {defendants_text}
+   Already confirmed PR: {primary_text}
+   Additional candidates to check:
+   {candidates_text}"""
+            )
+
+        all_cases_text = "\n\n".join(cases_text)
+
+        prompt = f"""You are checking whether additional CIAA press releases belong to already-confirmed court cases.
+
+For each case, a primary press release is already confirmed. You must decide which (if any) of the additional candidates are ALSO about the same case — for example, duplicate entries or companion press releases for the same filing event.
+
+{all_cases_text}
+
+RULES:
+- Only confirm an additional PR if it is clearly about the SAME filing event as the confirmed PR (same defendants, same institution, same crime).
+- A PR with a nearly identical title to the confirmed PR is very likely a duplicate — confirm it.
+- If unsure, return an empty list for that case.
+- NEPALI SPELLING VARIATIONS ARE VALID: ण/न, व/ब, ष/श, ं/ँ are the same character written differently.
+
+Answer with JSON only (no other text):
+{{
+  "results": [
+    {{
+      "case_number": "080-CR-XXXX",
+      "additional_pr_indices": [] or [1, 2, ...] (1-based indices from the additional candidates list)
+    }},
+    ...
+  ]
+}}"""
+
+        try:
+            client = self._get_client()
+            response_text = None
+            last_error = None
+
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    response = client.models.generate_content(
+                        model=self.model, contents=prompt, config={"temperature": 0.0}
+                    )
+                    response_text = response.text
+                    break
+                except Exception as e:
+                    last_error = e
+                    err_str = str(e)
+                    is_transient = (
+                        "503" in err_str
+                        or "UNAVAILABLE" in err_str
+                        or "429" in err_str
+                        or "rate" in err_str.lower()
+                    )
+                    if is_transient and attempt < _MAX_RETRIES - 1:
+                        delay = _RETRY_DELAYS[attempt]
+                        logger.warning(
+                            "LLM transient error (attempt %d/%d), retrying in %ds: %s",
+                            attempt + 1,
+                            _MAX_RETRIES,
+                            delay,
+                            err_str[:100],
+                        )
+                        time.sleep(delay)
+                    else:
+                        raise
+
+            if not response_text:
+                raise last_error or Exception("Failed to get response from LLM")
+
+            response_data = json.loads(response_text)
+            results_list = response_data.get("results", [])
+
+            results: dict[str, list[int]] = {}
+            for case in cases:
+                case_num = case["case_number"]
+                candidates = case["secondary_pr_candidates"]
+                result = next(
+                    (r for r in results_list if r.get("case_number") == case_num), None
+                )
+                if result:
+                    indices = result.get("additional_pr_indices") or []
+                    confirmed_ids = []
+                    for idx in indices:
+                        try:
+                            idx_int = int(idx)
+                            if 1 <= idx_int <= len(candidates):
+                                raw_id = candidates[idx_int - 1].get("press_id")
+                                if raw_id is not None:
+                                    confirmed_ids.append(int(raw_id))
+                        except (TypeError, ValueError):
+                            pass
+                    results[case_num] = confirmed_ids
+                    if confirmed_ids:
+                        logger.info(
+                            "[%s] LLM confirmed %d additional PR(s): %s",
+                            case_num,
+                            len(confirmed_ids),
+                            confirmed_ids,
+                        )
+                else:
+                    results[case_num] = []
+
+            return results
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse LLM secondary PR response: %s", e)
+            return {case["case_number"]: [] for case in cases}
+        except Exception as e:
+            logger.error("LLM secondary PR verification failed: %s", e)
+            return {case["case_number"]: [] for case in cases}
+
     def verify_multi_case_batch(
         self,
         cases: list[dict],

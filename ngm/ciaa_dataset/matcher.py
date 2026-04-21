@@ -524,6 +524,30 @@ class MatchingEngine:
                 title=best_pr.get("title") or "",
             )
         ]
+
+        # Collect secondary candidates from the same date group for LLM verification.
+        # These are PRs that scored >= 0.5 (matched on defendant names) but are not
+        # the primary match. LLM will decide if they also belong to this case.
+        if defer_llm and all_defendants and best_group != "undated":
+            best_pr_id = int(best_pr.get("press_id") or 0)
+            secondary_candidates = [
+                pr
+                for score, pr, _, group in all_scored
+                if int(pr.get("press_id") or 0) != best_pr_id
+                and group == best_group
+                and score >= 0.75
+            ]
+            if secondary_candidates:
+                all_defendant_names = [
+                    d["name"] for d in all_defendants if d.get("name")
+                ]
+                llm_defer_data = {
+                    "defendant_names": all_defendant_names,
+                    "confirmed_primary_pr": best_pr,
+                    "secondary_pr_candidates": secondary_candidates,
+                }
+                return matched, best_score, best_signals, llm_defer_data
+
         return matched, best_score, best_signals, None
 
     def _match_charge_sheet(
