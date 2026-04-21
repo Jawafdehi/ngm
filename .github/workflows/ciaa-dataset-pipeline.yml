@@ -24,7 +24,7 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     environment: 'NGM Scrape'
-    timeout-minutes: 220
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -56,18 +56,29 @@ jobs:
       - name: Resolve pipeline arguments
         id: args
         run: |
-          # Use input from_year if provided, otherwise default to (current FY - 3) for last 4 FYs
-          FROM_YEAR="${{ inputs.from_year }}"
-          if [ -z "$FROM_YEAR" ]; then
+          # Validate and sanitize input from_year
+          INPUT_YEAR="${{ inputs.from_year }}"
+          
+          if [ -n "$INPUT_YEAR" ]; then
+            # Validate format: must be 4 digits starting with 20
+            if ! echo "$INPUT_YEAR" | grep -qE '^20[0-9]{2}$'; then
+              echo "Error: Invalid fiscal year format '$INPUT_YEAR'. Expected format: 20XX (e.g., 2078)"
+              exit 1
+            fi
+            FROM_YEAR="$INPUT_YEAR"
+          else
+            # Default to (current FY - 3) for last 4 FYs
             FROM_YEAR=$(TZ=Asia/Kathmandu python3 - <<'PY'
-from datetime import datetime
-n = datetime.now()
-fy = n.year + (57 if (n.month, n.day) >= (7, 16) else 56)
-print(fy - 3)
-PY
-)
+          from datetime import datetime
+          n = datetime.now()
+          fy = n.year + (57 if (n.month, n.day) >= (7, 16) else 56)
+          print(fy - 3)
+          PY
+          )
           fi
+          
           echo "pipeline_args=--from-year $FROM_YEAR" >> "$GITHUB_OUTPUT"
+          echo "Resolved from_year: $FROM_YEAR"
 
       - name: Run CIAA Dataset Pipeline
         working-directory: ./ngm
