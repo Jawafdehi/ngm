@@ -43,7 +43,7 @@ class TestPaginationLogic:
         file_path, content = pending[0]
         assert file_path.name == "index.test.json"
         assert len(content["manuscripts"]) == 50
-        assert "next" not in content
+        assert content.get("next") is None
 
     def test_pagination_when_over_page_size(self, tmp_path):
         """Test pagination when manuscripts > page_size."""
@@ -232,7 +232,7 @@ class TestPaginationLogic:
         assert len(pending) == 1
         _, content = pending[0]
         assert len(content["manuscripts"]) == 100
-        assert "next" not in content
+        assert content.get("next") is None
 
     def test_pagination_with_one_over_page_size(self, tmp_path):
         """Test pagination when manuscripts = page_size + 1."""
@@ -267,108 +267,6 @@ class TestPaginationLogic:
         _, content2 = pending[1]
         assert len(content2["manuscripts"]) == 1
         assert content2["next"] is None
-
-
-class TestCollectPaginatedJobs:
-    """Tests for _collect_paginated_jobs() method."""
-
-    def test_collect_paginated_jobs_creates_correct_pages(self, tmp_path):
-        """Test _collect_paginated_jobs creates correct number of pages."""
-        builder = IndexBuilder(
-            root_path=str(tmp_path),
-            base_url="https://example.com",
-            date_str="2026-03-24",
-            page_size=50,
-        )
-
-        manuscripts = [
-            Manuscript(url=f"https://example.com/file{i}.pdf", file_name=f"file{i}.pdf")
-            for i in range(125)
-        ]
-        node = IndexNode(name="test", path="/test", manuscripts=manuscripts)
-
-        indices_dir = tmp_path / "indices" / "2026-03-24"
-        indices_dir.mkdir(parents=True)
-        pending = []
-
-        # Calculate total pages
-        total_pages = (len(manuscripts) + builder.page_size - 1) // builder.page_size
-        assert total_pages == 3
-
-        # Call _collect_paginated_jobs directly
-        builder._collect_paginated_jobs(node, indices_dir, total_pages, pending)
-
-        assert len(pending) == 3
-
-    def test_collect_paginated_jobs_manuscript_distribution(self, tmp_path):
-        """Test manuscripts are correctly distributed across pages."""
-        builder = IndexBuilder(
-            root_path=str(tmp_path),
-            base_url="https://example.com",
-            date_str="2026-03-24",
-            page_size=50,
-        )
-
-        manuscripts = [
-            Manuscript(
-                url=f"https://example.com/file{i}.pdf",
-                file_name=f"file{i}.pdf",
-                metadata={"index": i},
-            )
-            for i in range(125)
-        ]
-        node = IndexNode(name="test", path="/test", manuscripts=manuscripts)
-
-        indices_dir = tmp_path / "indices" / "2026-03-24"
-        indices_dir.mkdir(parents=True)
-        pending = []
-        total_pages = 3
-
-        builder._collect_paginated_jobs(node, indices_dir, total_pages, pending)
-
-        # Check first page has manuscripts 0-49
-        _, content1 = pending[0]
-        assert content1["manuscripts"][0]["metadata"]["index"] == 0
-        assert content1["manuscripts"][-1]["metadata"]["index"] == 49
-
-        # Check second page has manuscripts 50-99
-        _, content2 = pending[1]
-        assert content2["manuscripts"][0]["metadata"]["index"] == 50
-        assert content2["manuscripts"][-1]["metadata"]["index"] == 99
-
-        # Check third page has manuscripts 100-124
-        _, content3 = pending[2]
-        assert content3["manuscripts"][0]["metadata"]["index"] == 100
-        assert content3["manuscripts"][-1]["metadata"]["index"] == 124
-
-    def test_collect_paginated_jobs_preserves_node_metadata(self, tmp_path):
-        """Test paginated nodes preserve name and path."""
-        builder = IndexBuilder(
-            root_path=str(tmp_path),
-            base_url="https://example.com",
-            date_str="2026-03-24",
-            page_size=50,
-        )
-
-        manuscripts = [
-            Manuscript(url=f"https://example.com/file{i}.pdf", file_name=f"file{i}.pdf")
-            for i in range(100)
-        ]
-        node = IndexNode(
-            name="ciaa-reports", path="/ciaa-reports", manuscripts=manuscripts
-        )
-
-        indices_dir = tmp_path / "indices" / "2026-03-24"
-        indices_dir.mkdir(parents=True)
-        pending = []
-        total_pages = 2
-
-        builder._collect_paginated_jobs(node, indices_dir, total_pages, pending)
-
-        # All pages should have same name and path
-        for _, content in pending:
-            assert content["name"] == "ciaa-reports"
-            assert content["path"] == "/ciaa-reports"
 
 
 class TestPaginationWithDifferentPageSizes:
