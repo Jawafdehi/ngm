@@ -8,7 +8,6 @@ Tests:
 """
 
 import pytest
-from pathlib import Path
 from ngm.index.build_index import IndexBuilder
 from ngm.index.models import IndexNode
 
@@ -25,7 +24,7 @@ class TestIndexBuilderInit:
             page_size=100,
         )
 
-        assert builder.root_path == tmp_path
+        assert str(builder.root_path) == str(tmp_path)
         assert builder.base_url == "https://abc.com"
         assert builder.date_str == "2026-03-24"
         assert builder.page_size == 100
@@ -121,7 +120,7 @@ class TestIndexBuilderPathHelpers:
             date_str="2026-03-24",
         )
 
-        outside_path = Path("/some/different/path/file.pdf")
+        outside_path = tmp_path.parent / "outside" / "file.pdf"
 
         with pytest.raises(ValueError, match="is outside root_path"):
             builder._relative_path(outside_path)
@@ -178,8 +177,6 @@ class TestIndexBuilderFilenameGeneration:
             date_str="2026-03-24",
         )
 
-        from ngm.index.models import IndexNode
-
         node = IndexNode(name="kanun-patrika", path="/kanun-patrika")
 
         result = builder._node_filename(node)
@@ -193,8 +190,6 @@ class TestIndexBuilderFilenameGeneration:
             date_str="2026-03-24",
         )
 
-        from ngm.index.models import IndexNode
-
         node = IndexNode(name="081", path="/court-orders/supreme/081")
 
         result = builder._node_filename(node)
@@ -207,8 +202,6 @@ class TestIndexBuilderFilenameGeneration:
             base_url="https://abc.com",
             date_str="2026-03-24",
         )
-
-        from ngm.index.models import IndexNode
 
         node = IndexNode(name="kanun-patrika", path="/kanun-patrika")
 

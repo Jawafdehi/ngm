@@ -5,7 +5,7 @@ Tests:
 - Pagination when manuscripts > PAGE_SIZE
 - Filename generation for paginated nodes
 - Next link generation
-- _collect_paginated_jobs() method
+- _collect_paginated_manuscripts_jobs() method (via _collect_write_jobs)
 """
 
 import pytest

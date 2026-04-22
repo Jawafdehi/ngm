@@ -125,20 +125,6 @@ class TestNodeToDictForFile:
         assert "next" in result
         assert result["next"] is None
 
-    def test_no_next_key_when_next_url_not_set(self, tmp_path):
-        """Non-paginated nodes should not have a 'next' key at all."""
-        builder = make_builder(tmp_path)
-        # next_url defaults to None via dataclass default — but _node_to_dict_for_file
-        # only emits 'next' when next_url is explicitly set on the node instance.
-        node = IndexNode(name="test", path="/test", manuscripts=make_manuscripts(1))
-        # Do NOT set node.next_url — leave as dataclass default
-
-        result = builder._node_to_dict_for_file(node)
-
-        # For a plain non-paginated node the key should be absent
-        # (pipeline only sets next_url on page nodes it creates)
-        assert "next" not in result or result["next"] is None
-
 
 # write_index_files — actual file output
 
