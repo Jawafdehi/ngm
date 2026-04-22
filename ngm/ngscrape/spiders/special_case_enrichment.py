@@ -199,19 +199,19 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
         self.logger.error(f"Error enriching case {case_number}: {failure.value}")
 
         with self.session.begin():
-        case = (
-            self.session.query(CourtCase)
-            .filter(
-                and_(
-                    CourtCase.case_number == case_number,
-                    CourtCase.court_identifier == COURT_ID,
+            case = (
+                self.session.query(CourtCase)
+                .filter(
+                    and_(
+                        CourtCase.case_number == case_number,
+                        CourtCase.court_identifier == COURT_ID,
+                    )
                 )
+                .first()
             )
-            .first()
-        )
-        if case:
-            case.status = "failed"
-            case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
+            if case:
+                case.status = "failed"
+                case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
 
     def parse_case_detail(self, response):
         """Parse the case detail page and update database"""
@@ -330,7 +330,7 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
                                     name = name.strip()
                                     if name:
                                         entities["plaintiffs"].append(
-                                        {"name": name[:500], "address": None}
+                                            {"name": name[:500], "address": None}
                                         )
                         elif label == "प्रतिवादीहरु":
                             if value:
