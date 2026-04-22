@@ -19,9 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Earliest fiscal year with CIAA Special Court data
-EARLIEST_FISCAL_YEAR = 2059
-
 
 def _current_fiscal_year() -> int:
     """Return the current BS fiscal year based on today's date (approximate)."""
@@ -178,16 +175,31 @@ def run_fiscal_year(
 
         # Check if LLM verification is needed
         if hasattr(match, "llm_defer_data") and match.llm_defer_data:
-            cases_needing_llm.append(
-                {
-                    "case_number": case.case_number,
-                    "defendant_names": match.llm_defer_data["defendant_names"],
-                    "press_release_candidates": match.llm_defer_data[
-                        "press_release_candidates"
-                    ],
-                    "scored_candidates": match.llm_defer_data["scored_candidates"],
-                }
-            )
+            defer_data = match.llm_defer_data
+            if "confirmed_primary_pr" in defer_data:
+                # Primary match is confirmed — check secondary PR candidates
+                cases_needing_llm.append(
+                    {
+                        "case_number": case.case_number,
+                        "defendant_names": defer_data["defendant_names"],
+                        "confirmed_primary_pr": defer_data["confirmed_primary_pr"],
+                        "secondary_pr_candidates": defer_data[
+                            "secondary_pr_candidates"
+                        ],
+                    }
+                )
+            else:
+                # Primary match needs LLM verification
+                cases_needing_llm.append(
+                    {
+                        "case_number": case.case_number,
+                        "defendant_names": defer_data["defendant_names"],
+                        "press_release_candidates": defer_data[
+                            "press_release_candidates"
+                        ],
+                        "scored_candidates": defer_data["scored_candidates"],
+                    }
+                )
 
     # Log Phase 1 summary
     logger.info(
@@ -198,16 +210,27 @@ def run_fiscal_year(
 
     # Phase 2: Batch LLM verification (ONE call for all cases)
     llm_results = {}
-    if cases_needing_llm:
+    llm_secondary_results: dict[str, list[int]] = {}
+
+    # Separate cases needing primary match from those needing secondary PR check
+    cases_needing_secondary: list[dict] = []
+    for case_data in cases_needing_llm:
+        if "confirmed_primary_pr" in case_data:
+            cases_needing_secondary.append(case_data)
+    cases_needing_primary = [
+        c for c in cases_needing_llm if "confirmed_primary_pr" not in c
+    ]
+
+    if cases_needing_primary:
         logger.info(
             "Phase 2: Running batch LLM verification for %d cases",
-            len(cases_needing_llm),
+            len(cases_needing_primary),
         )
         try:
             from ngm.ciaa_dataset.llm_verifier import LLMVerifier
 
             verifier = LLMVerifier()
-            llm_results = verifier.verify_multi_case_batch(cases_needing_llm)
+            llm_results = verifier.verify_multi_case_batch(cases_needing_primary)
             logger.info(
                 "Phase 2 complete: %d LLM verifications completed", len(llm_results)
             )
@@ -215,15 +238,38 @@ def run_fiscal_year(
             # LLM misconfiguration (missing env vars, invalid model)
             logger.error(
                 "LLM configuration error for %d cases; continuing without LLM verification: %s",
-                len(cases_needing_llm),
+                len(cases_needing_primary),
                 e,
             )
         except Exception as e:
             logger.error(
                 "Batch LLM verification failed for %d cases; continuing without LLM signal: %s",
-                len(cases_needing_llm),
+                len(cases_needing_primary),
                 e,
             )
+
+    if cases_needing_secondary:
+        logger.info(
+            "Phase 2b: Verifying secondary PRs for %d confirmed cases",
+            len(cases_needing_secondary),
+        )
+        try:
+            from ngm.ciaa_dataset.llm_verifier import LLMVerifier
+
+            verifier = LLMVerifier()
+            llm_secondary_results = verifier.verify_secondary_prs(
+                cases_needing_secondary
+            )
+            logger.info(
+                "Phase 2b complete: secondary PR check done for %d cases",
+                len(llm_secondary_results),
+            )
+        except ValueError as e:
+            logger.error(
+                "LLM configuration error for secondary PR check; skipping: %s", e
+            )
+        except Exception as e:
+            logger.error("Secondary PR LLM verification failed; skipping: %s", e)
 
     # Phase 3: Apply LLM results and build final cases
     logger.info("Phase 3: Building final case records...")
@@ -332,6 +378,39 @@ def run_fiscal_year(
                         explanation,
                     )
 
+        # Apply secondary PR results (additional PRs for already-confirmed cases)
+        if case_number in llm_secondary_results:
+            additional_ids = llm_secondary_results[case_number]
+            if additional_ids and match.press_releases:
+                defer_data = match.llm_defer_data or {}
+                secondary_candidates = defer_data.get("secondary_pr_candidates", [])
+                existing_ids = {pr.release_id for pr in match.press_releases}
+                for pr_id in additional_ids:
+                    if pr_id in existing_ids:
+                        continue
+                    pr_dict = next(
+                        (
+                            p
+                            for p in secondary_candidates
+                            if int(p.get("press_id") or 0) == pr_id
+                        ),
+                        None,
+                    )
+                    if pr_dict:
+                        match.press_releases.append(
+                            PressReleaseRecord(
+                                release_id=pr_id,
+                                url=pr_dict.get("source_url") or "",
+                                r2_metadata_url=None,
+                                date=pr_dict.get("publication_date") or "",
+                                title=pr_dict.get("title") or "",
+                            )
+                        )
+                        match.match_signals.append(
+                            f"llm_secondary_pr_confirmed:{pr_id}"
+                        )
+                        existing_ids.add(pr_id)
+
         # Safety check: confirmed/needs_review with no press releases is invalid
         if (
             match.match_status in ("confirmed", "needs_review")
@@ -407,17 +486,42 @@ def run_fiscal_year(
 def main() -> None:
     parser = argparse.ArgumentParser(description="CIAA Cases Dataset Pipeline")
     parser.add_argument(
-        "--fiscal-year",
+        "--from-year",
         type=int,
         default=None,
-        help="BS fiscal year start (e.g. 2080). Defaults to current year.",
+        metavar="YEAR",
+        help="Process all BS fiscal years from YEAR up to the current year. Defaults to current year only.",
     )
     args = parser.parse_args()
 
-    fiscal_year = args.fiscal_year or _current_fiscal_year()
-    fiscal_years = [fiscal_year]
+    current_fy = _current_fiscal_year()
+
+    if args.from_year is not None:
+        if args.from_year <= 0:
+            logger.error(
+                "--from-year %d is invalid; expected a positive BS fiscal year",
+                args.from_year,
+            )
+            sys.exit(1)
+        if args.from_year > current_fy:
+            logger.error(
+                "--from-year %d is in the future (current FY is %d)",
+                args.from_year,
+                current_fy,
+            )
+            sys.exit(1)
+        fiscal_years = list(range(args.from_year, current_fy + 1))
+        logger.info(
+            "Processing fiscal years: %d - %d (%d years)",
+            args.from_year,
+            current_fy,
+            len(fiscal_years),
+        )
+    else:
+        fiscal_years = [current_fy]
 
     all_stats = []
+    failed_years = []
     for fy in fiscal_years:
         try:
             stats = run_fiscal_year(
@@ -426,9 +530,19 @@ def main() -> None:
                 press_releases_csv_path="ngm/ciaa_dataset/data/ciaa-press-releases.csv",
             )
             all_stats.append(stats)
-        except Exception as e:
-            logger.error("Pipeline failed for fiscal year %d: %s", fy, e)
-            sys.exit(1)
+            if stats.get("write_failures", 0) > 0:
+                logger.error(
+                    "Fiscal year %d completed with %d write failures",
+                    fy,
+                    stats["write_failures"],
+                )
+                failed_years.append(fy)
+        except Exception:
+            logger.exception("Pipeline failed for fiscal year %d", fy)
+            failed_years.append(fy)
+            # Continue processing remaining years rather than aborting
+            if len(fiscal_years) == 1:
+                sys.exit(1)
 
     # Summary report
     logger.info("\n=== CIAA Dataset Pipeline Summary ===")
@@ -443,7 +557,12 @@ def main() -> None:
             s.get("write_failures", 0),
             s["written"],
         )
+    if failed_years:
+        logger.error("  FAILED years: %s", ", ".join(str(y) for y in failed_years))
     logger.info("=====================================\n")
+
+    if failed_years:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

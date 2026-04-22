@@ -137,10 +137,10 @@ def _parse_bs_month(date_bs: str) -> Optional[tuple[int, int]]:
 
 def _is_within_date_range(case_date_bs: str, release_date: str) -> bool:
     """
-    Check if press release is within ±2 days of case registration.
+    Check if press release is within ±3 days of case registration.
 
     Press releases are typically published on or shortly after case filing.
-    In rare cases, they may be published up to 2 days before registration.
+    In rare cases, they may be published up to 3 days before registration.
 
     Undated press releases (empty release_date) are always included.
     """
@@ -166,7 +166,7 @@ def _is_within_date_range(case_date_bs: str, release_date: str) -> bool:
         return False
 
     diff = release_days - case_days
-    return -2 <= diff <= 2
+    return -3 <= diff <= 3
 
 
 def _calculate_day_difference(case_date: str, pr_date: str) -> Optional[int]:
@@ -234,7 +234,7 @@ class MatchingEngine:
         if ym:
             year, month = ym
             # Include same month, previous month, and next month
-            # to catch PRs within ±2 days that cross month boundaries
+            # to catch PRs within ±3 days that cross month boundaries
             buckets.update(
                 {
                     ym,  # Same month
@@ -444,7 +444,7 @@ class MatchingEngine:
         case_date = case.registration_date_bs or ""
 
         # Bucket candidates by date proximity
-        same_day, one_day, two_day, undated = [], [], [], []
+        same_day, one_day, two_day, three_day, undated = [], [], [], [], []
         for pr in candidates:
             pr_date = pr.get("publication_date") or ""
             if not pr_date:
@@ -459,11 +459,14 @@ class MatchingEngine:
                 one_day.append(pr)
             elif day_diff == 2:
                 two_day.append(pr)
+            elif day_diff == 3:
+                three_day.append(pr)
 
         candidate_groups = [
             (same_day, "same_day"),
             (one_day, "±1_day"),
             (two_day, "±2_days"),
+            (three_day, "±3_days"),
             (undated, "undated"),
         ]
 
@@ -521,6 +524,30 @@ class MatchingEngine:
                 title=best_pr.get("title") or "",
             )
         ]
+
+        # Collect secondary candidates from the same date group for LLM verification.
+        # These are PRs that scored >= 0.5 (matched on defendant names) but are not
+        # the primary match. LLM will decide if they also belong to this case.
+        if defer_llm and all_defendants and best_group != "undated":
+            best_pr_id = int(best_pr.get("press_id") or 0)
+            secondary_candidates = [
+                pr
+                for score, pr, _, group in all_scored
+                if int(pr.get("press_id") or 0) != best_pr_id
+                and group == best_group
+                and score >= 0.75
+            ]
+            if secondary_candidates:
+                all_defendant_names = [
+                    d["name"] for d in all_defendants if d.get("name")
+                ]
+                llm_defer_data = {
+                    "defendant_names": all_defendant_names,
+                    "confirmed_primary_pr": best_pr,
+                    "secondary_pr_candidates": secondary_candidates,
+                }
+                return matched, best_score, best_signals, llm_defer_data
+
         return matched, best_score, best_signals, None
 
     def _match_charge_sheet(

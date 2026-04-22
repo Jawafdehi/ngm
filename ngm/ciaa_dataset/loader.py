@@ -1,4 +1,4 @@
-"""DataLoader - fetches case data from NGM DB using hardcoded case numbers from constants.py."""
+"""DataLoader - fetches case data from the NGM database and CSV files."""
 
 from __future__ import annotations
 
@@ -45,43 +45,58 @@ class DataLoader:
         return get_session(self._engine)
 
     # ------------------------------------------------------------------
-    # Court cases from DB (filtered by constants.py)
+    # Court cases from DB
     # ------------------------------------------------------------------
 
     def load_special_court_cases(self, fiscal_year: int) -> list[CourtCase]:
         """
-        Return Special Court cases from database for case numbers in constants.py.
+        Return Special Court cases for a given fiscal year.
 
-        Uses TARGET_CASE_NUMBERS from constants.py as the definitive list.
+        Uses constants.py allowlist if entries exist for the year, otherwise
+        falls back to a DB prefix query (covers years not yet in constants.py).
         """
-        # Filter TARGET_CASE_NUMBERS by fiscal year
-        fy_prefix = str(fiscal_year)[-2:]  # e.g., 2080 -> "80"
+        fy_prefix = str(fiscal_year)[-2:]  # e.g. 2080 -> "80"
         prefix = f"0{fy_prefix}-CR-"
         target_cases = [cn for cn in TARGET_CASE_NUMBERS if cn.startswith(prefix)]
-
-        if not target_cases:
-            logger.warning(
-                "No target case numbers found for FY %d in constants.py", fiscal_year
-            )
-            return []
 
         session = self._session()
         try:
             with session.begin():
-                cases = (
-                    session.query(CourtCase)
-                    .filter(
-                        CourtCase.court_identifier == "special",
-                        CourtCase.case_number.in_(target_cases),
+                if target_cases:
+                    cases = (
+                        session.query(CourtCase)
+                        .filter(
+                            CourtCase.court_identifier == "special",
+                            CourtCase.case_number.in_(target_cases),
+                        )
+                        .all()
                     )
-                    .all()
-                )
-                # Detach from session so they can be used after close
+                    logger.info(
+                        "Loaded %d Special Court cases from database (constants.py allowlist)",
+                        len(cases),
+                    )
+                else:
+                    logger.info(
+                        "No constants.py entries for FY %d; querying DB by prefix '%s'",
+                        fiscal_year,
+                        prefix,
+                    )
+                    cases = (
+                        session.query(CourtCase)
+                        .filter(
+                            CourtCase.court_identifier == "special",
+                            CourtCase.case_number.like(f"{prefix}%"),
+                        )
+                        .order_by(CourtCase.case_number)
+                        .all()
+                    )
+                    logger.info(
+                        "Loaded %d Special Court cases from database (DB prefix query for FY %d)",
+                        len(cases),
+                        fiscal_year,
+                    )
+
                 session.expunge_all()
-                logger.info(
-                    "Loaded %d Special Court cases from database (filtered by constants.py)",
-                    len(cases),
-                )
                 return cases
         finally:
             session.close()
@@ -105,8 +120,10 @@ class DataLoader:
         finally:
             session.close()
 
-    def load_defendants(self, case_number: str, court_identifier: str) -> list[dict]:
-        """Load structured defendant records from court_case_entities table."""
+    def _load_entities(
+        self, case_number: str, court_identifier: str, side: str
+    ) -> list[dict]:
+        """Load party records (defendants or plaintiffs) from court_case_entities."""
         session = self._session()
         try:
             with session.begin():
@@ -115,53 +132,30 @@ class DataLoader:
                     .filter(
                         CaseEntity.case_number == case_number,
                         CaseEntity.court_identifier == court_identifier,
-                        CaseEntity.side == "defendant",
+                        CaseEntity.side == side,
                     )
                     .all()
                 )
-
                 result = []
                 for e in entities:
                     # Split comma-separated names (some rows have multiple defendants in one field)
-                    if "," in e.name:
-                        names = [n.strip() for n in e.name.split(",") if n.strip()]
-                        for name in names:
-                            result.append({"name": name})
-                    else:
-                        result.append({"name": e.name})
-
+                    names = [n.strip() for n in (e.name or "").split(",")]
+                    result.extend({"name": name} for name in names if name)
                 return result
         finally:
             session.close()
+
+    def load_defendants(self, case_number: str, court_identifier: str) -> list[dict]:
+        """Load defendant records from court_case_entities."""
+        return self._load_entities(case_number, court_identifier, "defendant")
 
     def load_plaintiffs(self, case_number: str, court_identifier: str) -> list[dict]:
-        """Load structured plaintiff records from court_case_entities table."""
-        session = self._session()
-        try:
-            with session.begin():
-                entities = (
-                    session.query(CaseEntity)
-                    .filter(
-                        CaseEntity.case_number == case_number,
-                        CaseEntity.court_identifier == court_identifier,
-                        CaseEntity.side == "plaintiff",
-                    )
-                    .all()
-                )
+        """Load plaintiff records from court_case_entities."""
+        return self._load_entities(case_number, court_identifier, "plaintiff")
 
-                result = []
-                for e in entities:
-                    # Split comma-separated names (some rows have multiple plaintiffs in one field)
-                    if "," in e.name:
-                        names = [n.strip() for n in e.name.split(",") if n.strip()]
-                        for name in names:
-                            result.append({"name": name})
-                    else:
-                        result.append({"name": e.name})
-
-                return result
-        finally:
-            session.close()
+    # ------------------------------------------------------------------
+    # CSV data sources
+    # ------------------------------------------------------------------
 
     def load_press_release_index(self) -> list[dict]:
         """
@@ -221,7 +215,6 @@ class DataLoader:
                         "pdf_url": (row.get("pdf_url") or "").strip(),
                         "court_office": (row.get("court_office") or "").strip(),
                     }
-
         logger.info("Loaded %d AG index entries", len(index))
         return index
 
