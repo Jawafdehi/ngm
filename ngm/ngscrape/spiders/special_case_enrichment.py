@@ -198,6 +198,21 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
 
         self.logger.error(f"Error enriching case {case_number}: {failure.value}")
 
+        with self.session.begin():
+            case = (
+                self.session.query(CourtCase)
+                .filter(
+                    and_(
+                        CourtCase.case_number == case_number,
+                        CourtCase.court_identifier == COURT_ID,
+                    )
+                )
+                .first()
+            )
+            if case:
+                case.status = "failed"
+                case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
+
     def parse_case_detail(self, response):
         """Parse the case detail page and update database"""
         soup = BeautifulSoup(response.text, "html.parser")
@@ -311,14 +326,20 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
                             )
                         elif label == "वादीहरु":
                             if value:
-                                entities["plaintiffs"].append(
-                                    {"name": value[:500], "address": None}
-                                )
+                                for name in value.split(","):
+                                    name = name.strip()
+                                    if name:
+                                        entities["plaintiffs"].append(
+                                            {"name": name[:500], "address": None}
+                                        )
                         elif label == "प्रतिवादीहरु":
                             if value:
-                                entities["defendants"].append(
-                                    {"name": value[:500], "address": None}
-                                )
+                                for name in value.split(","):
+                                    name = name.strip()
+                                    if name:
+                                        entities["defendants"].append(
+                                            {"name": name[:500], "address": None}
+                                        )
                         elif "वादी अधिवक्ता" in label:
                             if value:
                                 hearings_timeline["plaintiff_advocates"] = value
