@@ -40,8 +40,11 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Install dependencies
+      - name: Install dependencies # installs all library project needs
         run: poetry install --no-interaction --no-root
+
+      - name: Install project # install the actual project (ngm)
+        run: poetry install --no-interaction
 
       - name: Resolve pipeline arguments
         id: args
@@ -71,7 +74,6 @@ jobs:
           echo "Resolved from_year: $FROM_YEAR"
 
       - name: Run CIAA Dataset Pipeline
-        working-directory: ./ngm
         run: poetry run python -m ngm.ciaa_dataset.pipeline ${{ steps.args.outputs.pipeline_args }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
