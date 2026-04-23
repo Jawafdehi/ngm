@@ -40,8 +40,11 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Install dependencies
+      - name: Install dependencies # installs all library project needs
         run: poetry install --no-interaction --no-root
+
+      - name: Install project # install the actual project (ngm)
+        run: poetry install --no-interaction
 
       - name: Resolve pipeline arguments
         id: args
