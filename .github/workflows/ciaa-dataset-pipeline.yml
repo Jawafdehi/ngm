@@ -74,7 +74,6 @@ jobs:
           echo "Resolved from_year: $FROM_YEAR"
 
       - name: Run CIAA Dataset Pipeline
-        working-directory: ./ngm
         run: poetry run python -m ngm.ciaa_dataset.pipeline ${{ steps.args.outputs.pipeline_args }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
