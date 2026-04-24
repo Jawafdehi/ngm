@@ -8,8 +8,9 @@ from typing import Optional
 class NGMCourtCaseClient:
     """Simple client for the NGM Court Case API."""
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
 
     def get_case(self, court: str, case_number: str) -> Optional[dict]:
         """
@@ -26,7 +27,7 @@ class NGMCourtCaseClient:
         url = f"{self.base_url}/api/ngm/court_case/{case_id}"
 
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
@@ -41,7 +42,7 @@ class NGMCourtCaseClient:
     def health_check(self) -> bool:
         """Check if the API is running."""
         try:
-            response = requests.get(f"{self.base_url}/")
+            response = requests.get(f"{self.base_url}/", timeout=self.timeout)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False

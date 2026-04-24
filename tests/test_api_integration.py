@@ -179,9 +179,11 @@ def test_case_response_structure():
 
 def test_cors_headers():
     """Test that CORS headers are present."""
-    response = client.get("/", headers={"Origin": "http://example.com"})
+    # Use an allowed origin from the default ALLOWED_ORIGINS
+    response = client.get("/", headers={"Origin": "http://localhost:3000"})
     # CORS headers should be present when Origin header is sent
     assert "access-control-allow-origin" in response.headers
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
 def test_case_id_with_special_characters():

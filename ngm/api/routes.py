@@ -1,10 +1,10 @@
 """API routes for court case data."""
 
 from fastapi import APIRouter, HTTPException, Depends, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from ngm.database.models import get_engine, get_session
+from ngm.database import get_engine
 from ngm.api.service import CourtCaseService
 from ngm.api.models import CourtCaseDetailResponse, HearingResponse, CaseEntityResponse
 from ngm.utils.case_normalizer import normalize_case_number
@@ -14,11 +14,24 @@ limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/ngm", tags=["court_cases"])
 
+# Create engine and sessionmaker once at module level
+_engine = None
+_SessionLocal = None
+
+
+def _get_sessionmaker():
+    """Get or create the sessionmaker (singleton pattern)."""
+    global _engine, _SessionLocal
+    if _SessionLocal is None:
+        _engine = get_engine()
+        _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+    return _SessionLocal
+
 
 def get_db():
     """Dependency for database session."""
-    engine = get_engine()
-    session = get_session(engine)
+    SessionLocal = _get_sessionmaker()
+    session = SessionLocal()
     try:
         yield session
     finally:

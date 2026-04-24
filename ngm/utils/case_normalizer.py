@@ -38,8 +38,8 @@ def normalize_case_number(case_number: str) -> str:
         "९": "9",
     }
 
-    # Convert Nepali numerals to English
-    normalized = case_number
+    # Strip whitespace and convert Nepali numerals to English
+    normalized = case_number.strip()
     for nepali, english in nepali_to_english.items():
         normalized = normalized.replace(nepali, english)
 
