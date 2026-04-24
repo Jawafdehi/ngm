@@ -1,6 +1,5 @@
 """Tests for case number normalization."""
 
-import pytest
 from ngm.utils.case_normalizer import normalize_case_number
 
 

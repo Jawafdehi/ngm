@@ -1,7 +1,5 @@
 """Case number normalization utilities."""
 
-import re
-
 
 def normalize_case_number(case_number: str) -> str:
     """
