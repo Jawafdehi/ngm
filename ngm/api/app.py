@@ -1,14 +1,21 @@
 """FastAPI application for NGM court case API."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from ngm.api.routes import router
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from ngm.api.routes import router, limiter
 
 app = FastAPI(
     title="NGM Court Case API",
     description="API for accessing Nepal court case data from the NGM database",
     version="1.0.0",
 )
+
+# Register rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configure CORS
 app.add_middleware(

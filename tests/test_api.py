@@ -171,6 +171,63 @@ def test_get_court_case_no_hearings(mock_service_class, mock_case):
 
 
 @patch("ngm.api.routes.CourtCaseService")
+def test_get_court_case_with_lowercase(mock_service_class, mock_case):
+    """Test case retrieval with lowercase case number."""
+    mock_case.case_number = "081-CR-0081"  # Normalized version
+
+    mock_service = Mock()
+    mock_service.get_case_detail.return_value = mock_case
+    mock_service_class.return_value = mock_service
+
+    # Request with lowercase
+    response = client.get("/api/ngm/court_case/supreme:081-cr-0081")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["case_number"] == "081-CR-0081"
+    # Verify service was called with normalized case number
+    mock_service.get_case_detail.assert_called_once_with("supreme", "081-CR-0081")
+
+
+@patch("ngm.api.routes.CourtCaseService")
+def test_get_court_case_with_missing_zeros(mock_service_class, mock_case):
+    """Test case retrieval with missing leading zeros."""
+    mock_case.case_number = "081-CR-0081"  # Normalized version
+
+    mock_service = Mock()
+    mock_service.get_case_detail.return_value = mock_case
+    mock_service_class.return_value = mock_service
+
+    # Request without leading zeros
+    response = client.get("/api/ngm/court_case/supreme:81-cr-81")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["case_number"] == "081-CR-0081"
+    # Verify service was called with normalized case number
+    mock_service.get_case_detail.assert_called_once_with("supreme", "081-CR-0081")
+
+
+@patch("ngm.api.routes.CourtCaseService")
+def test_get_court_case_with_nepali_numerals(mock_service_class, mock_case):
+    """Test case retrieval with Nepali numerals."""
+    mock_case.case_number = "081-CR-0081"  # Normalized version
+
+    mock_service = Mock()
+    mock_service.get_case_detail.return_value = mock_case
+    mock_service_class.return_value = mock_service
+
+    # Request with Nepali numerals
+    response = client.get("/api/ngm/court_case/supreme:०८१-CR-००८१")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["case_number"] == "081-CR-0081"
+    # Verify service was called with normalized case number
+    mock_service.get_case_detail.assert_called_once_with("supreme", "081-CR-0081")
+
+
+@patch("ngm.api.routes.CourtCaseService")
 def test_get_court_case_no_entities(mock_service_class, mock_case):
     """Test case with no entities."""
     mock_case.entities = []
