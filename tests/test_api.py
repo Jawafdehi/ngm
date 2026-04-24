@@ -5,7 +5,17 @@ from fastapi.testclient import TestClient
 from unittest.mock import Mock, patch
 from datetime import date, datetime
 from ngm.api.app import app
-from ngm.database.models import CourtCase, CourtCaseHearing, CaseEntity
+from ngm.api.routes import get_db
+
+
+# Mock database dependency
+def override_get_db():
+    """Override database dependency for testing."""
+    return Mock()
+
+
+# Override the dependency for all tests
+app.dependency_overrides[get_db] = override_get_db
 
 client = TestClient(app)
 
@@ -13,7 +23,7 @@ client = TestClient(app)
 @pytest.fixture
 def mock_case():
     """Create a mock court case with hearings and entities."""
-    case = Mock(spec=CourtCase)
+    case = Mock()
     case.case_number = "081-CR-0081"
     case.court_identifier = "supreme"
     case.registration_date_bs = "2081-05-15"
@@ -38,7 +48,7 @@ def mock_case():
     case.updated_at = datetime(2025, 1, 6, 10, 30, 0)
 
     # Mock hearing
-    hearing = Mock(spec=CourtCaseHearing)
+    hearing = Mock()
     hearing.id = 1234
     hearing.hearing_date_bs = "2081-09-20"
     hearing.hearing_date_ad = date(2025, 1, 5)
@@ -54,14 +64,14 @@ def mock_case():
     hearing.extra_data = None
 
     # Mock entities
-    plaintiff_entity = Mock(spec=CaseEntity)
+    plaintiff_entity = Mock()
     plaintiff_entity.id = 5678
     plaintiff_entity.side = "plaintiff"
     plaintiff_entity.name = "नेपाल सरकार"
     plaintiff_entity.address = "काठमाडौं"
     plaintiff_entity.nes_id = None
 
-    defendant_entity = Mock(spec=CaseEntity)
+    defendant_entity = Mock()
     defendant_entity.id = 5679
     defendant_entity.side = "defendant"
     defendant_entity.name = "जन बहादुर गुरुङ"

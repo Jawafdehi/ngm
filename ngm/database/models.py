@@ -7,6 +7,8 @@ from Nepal's court system (district, high, supreme, and special courts).
 
 import os
 from datetime import datetime
+
+from dotenv import load_dotenv
 from sqlalchemy import (
     Column,
     String,
@@ -20,6 +22,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
 from sqlalchemy.dialects.postgresql import JSONB
+
+# Load environment variables from .env file
+load_dotenv()
 
 Base = declarative_base()
 

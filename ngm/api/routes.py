@@ -64,6 +64,20 @@ def get_court_case_detail(
 
     court_identifier, case_number = parts
 
+    # Validate court_identifier is not empty
+    if not court_identifier or not court_identifier.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid case_id format. Expected format: {court}:{case_number} (e.g., supreme:081-CR-0081)",
+        )
+
+    # Validate case_number is not empty
+    if not case_number or not case_number.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid case_id format. Expected format: {court}:{case_number} (e.g., supreme:081-CR-0081)",
+        )
+
     # Normalize case number (handle different formats)
     case_number = normalize_case_number(case_number)
 

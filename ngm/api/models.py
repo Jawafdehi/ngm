@@ -2,11 +2,13 @@
 
 from datetime import date, datetime
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CaseEntityResponse(BaseModel):
     """Case entity (plaintiff or defendant) response model."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: int
     side: str = Field(description="Either 'plaintiff' or 'defendant'")
@@ -14,12 +16,11 @@ class CaseEntityResponse(BaseModel):
     address: Optional[str] = None
     nes_id: Optional[str] = Field(None, description="Nepal Entity Service ID")
 
-    class Config:
-        from_attributes = True
-
 
 class HearingResponse(BaseModel):
     """Court case hearing response model."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: int
     hearing_date_bs: str = Field(description="Hearing date in Bikram Sambat format")
@@ -35,12 +36,11 @@ class HearingResponse(BaseModel):
     scraped_at: datetime
     extra_data: Optional[dict] = None
 
-    class Config:
-        from_attributes = True
-
 
 class CourtCaseDetailResponse(BaseModel):
     """Complete court case detail response including hearings and entities."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     case_number: str
     court_identifier: str
@@ -68,6 +68,3 @@ class CourtCaseDetailResponse(BaseModel):
     # Related data
     hearings: list[HearingResponse] = Field(default_factory=list)
     entities: list[CaseEntityResponse] = Field(default_factory=list)
-
-    class Config:
-        from_attributes = True

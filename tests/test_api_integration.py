@@ -9,13 +9,30 @@ Set SKIP_INTEGRATION_TESTS=1 to skip these tests.
 import os
 import pytest
 from fastapi.testclient import TestClient
+from unittest.mock import Mock
 from ngm.api.app import app
+from ngm.api.routes import get_db
 
 # Skip integration tests if environment variable is set
 pytestmark = pytest.mark.skipif(
     os.environ.get("SKIP_INTEGRATION_TESTS") == "1",
     reason="Integration tests skipped (SKIP_INTEGRATION_TESTS=1)",
 )
+
+
+# Mock database dependency for tests that don't need real database
+def override_get_db():
+    """Override database dependency for testing."""
+    return Mock()
+
+
+# Clear any existing dependency overrides first
+app.dependency_overrides.clear()
+
+# Only override dependency if DATABASE_URL is not set
+# This allows tests to use real database when DATABASE_URL is available
+if not os.environ.get("DATABASE_URL"):
+    app.dependency_overrides[get_db] = override_get_db
 
 client = TestClient(app)
 
@@ -47,19 +64,22 @@ def test_openapi_schema():
 def test_invalid_case_id_format():
     """Test various invalid case_id formats."""
     invalid_ids = [
-        "invalid",
-        "no-colon",
-        "supreme",
-        ":081-CR-0081",
-        "supreme:",
-        "",
+        ("invalid", 400),
+        ("no-colon", 400),
+        ("supreme", 400),
+        (":081-CR-0081", 400),
+        ("supreme:", 400),
+        ("", 404),  # Empty string doesn't match route, returns 404
     ]
 
-    for case_id in invalid_ids:
+    for case_id, expected_status in invalid_ids:
         response = client.get(f"/api/ngm/court_case/{case_id}")
-        assert response.status_code == 400, f"Expected 400 for case_id: {case_id}"
-        data = response.json()
-        assert "Invalid case_id format" in data["detail"]
+        assert (
+            response.status_code == expected_status
+        ), f"Expected {expected_status} for case_id: '{case_id}', got {response.status_code}"
+        if expected_status == 400:
+            data = response.json()
+            assert "Invalid case_id format" in data["detail"]
 
 
 @pytest.mark.skipif(
@@ -159,14 +179,22 @@ def test_case_response_structure():
 
 def test_cors_headers():
     """Test that CORS headers are present."""
-    response = client.get("/")
-    # CORS headers should be present
+    response = client.get("/", headers={"Origin": "http://example.com"})
+    # CORS headers should be present when Origin header is sent
     assert "access-control-allow-origin" in response.headers
 
 
 def test_case_id_with_special_characters():
     """Test case_id parsing with various formats."""
-    # Valid format with colon in case number (should still work)
-    response = client.get("/api/ngm/court_case/supreme:081-CR-0081")
-    # Should be 200 or 404, not 400 (format error)
-    assert response.status_code in [200, 404]
+    # This test needs mocking since we don't have DATABASE_URL
+    from unittest.mock import patch, Mock
+
+    with patch("ngm.api.routes.CourtCaseService") as mock_service_class:
+        mock_service = Mock()
+        mock_service.get_case_detail.return_value = None  # Case not found
+        mock_service_class.return_value = mock_service
+
+        # Valid format with colon in case number (should still work)
+        response = client.get("/api/ngm/court_case/supreme:081-CR-0081")
+        # Should be 404 (not found) since we mocked it to return None
+        assert response.status_code == 404
