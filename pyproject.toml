@@ -20,6 +20,8 @@ cloudpathlib = {extras = ["s3"], version = "^0.23.0"}
 pydantic = "^2.0"
 rapidfuzz = "^3.0"
 google-genai = "^1.0.0"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.32.0"}
 
 
 [build-system]
@@ -30,3 +32,4 @@ build-backend = "poetry.core.masonry.api"
 pytest = "^8.0.0"
 black = "^24.0.0"
 ruff = "^0.1.0"
+requests = "^2.31.0"
