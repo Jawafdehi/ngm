@@ -49,9 +49,9 @@ def normalize_case_number(case_number: str) -> str:
         # Return as-is if format is unexpected
         return normalized.upper()
 
-    # Normalize each part
-    fiscal_year = parts[0].zfill(3)  # Pad to 3 digits
-    case_type = parts[1].upper()  # Uppercase
-    case_seq = parts[2].zfill(4)  # Pad to 4 digits
+    # Normalize each part (strip whitespace from each segment)
+    fiscal_year = parts[0].strip().zfill(3)  # Pad to 3 digits
+    case_type = parts[1].strip().upper()  # Uppercase
+    case_seq = parts[2].strip().zfill(4)  # Pad to 4 digits
 
     return f"{fiscal_year}-{case_type}-{case_seq}"

@@ -111,25 +111,31 @@ def test_context_manager(mock_session):
 
 def test_get_case_detail_success(mock_session, mock_case):
     """Test successful case retrieval."""
-    # Setup mock query chain
+    # Setup mock query chain with options
     mock_query = Mock()
+    mock_options = Mock()
     mock_filter = Mock()
-    mock_query.filter.return_value = mock_filter
+    mock_query.options.return_value = mock_options
+    mock_options.filter.return_value = mock_filter
     mock_filter.first.return_value = mock_case
     mock_session.query.return_value = mock_query
 
     # Mock hearings query
     mock_hearings_query = Mock()
+    mock_hearings_options = Mock()
     mock_hearings_filter = Mock()
     mock_hearings_order = Mock()
-    mock_hearings_query.filter.return_value = mock_hearings_filter
+    mock_hearings_query.options.return_value = mock_hearings_options
+    mock_hearings_options.filter.return_value = mock_hearings_filter
     mock_hearings_filter.order_by.return_value = mock_hearings_order
     mock_hearings_order.all.return_value = mock_case.hearings
 
     # Mock entities query
     mock_entities_query = Mock()
+    mock_entities_options = Mock()
     mock_entities_filter = Mock()
-    mock_entities_query.filter.return_value = mock_entities_filter
+    mock_entities_query.options.return_value = mock_entities_options
+    mock_entities_options.filter.return_value = mock_entities_filter
     mock_entities_filter.all.return_value = mock_case.entities
 
     # Setup query side effects
@@ -152,8 +158,10 @@ def test_get_case_detail_success(mock_session, mock_case):
 def test_get_case_detail_not_found(mock_session):
     """Test case not found scenario."""
     mock_query = Mock()
+    mock_options = Mock()
     mock_filter = Mock()
-    mock_query.filter.return_value = mock_filter
+    mock_query.options.return_value = mock_options
+    mock_options.filter.return_value = mock_filter
     mock_filter.first.return_value = None
     mock_session.query.return_value = mock_query
 
@@ -168,24 +176,30 @@ def test_case_number_normalization(mock_normalize, mock_session, mock_case):
     """Test that case numbers are normalized."""
     mock_normalize.return_value = "081-CR-0081"
 
-    # Setup mock query chain
+    # Setup mock query chain with options
     mock_query = Mock()
+    mock_options = Mock()
     mock_filter = Mock()
-    mock_query.filter.return_value = mock_filter
+    mock_query.options.return_value = mock_options
+    mock_options.filter.return_value = mock_filter
     mock_filter.first.return_value = mock_case
     mock_session.query.return_value = mock_query
 
     # Mock hearings and entities queries
     mock_hearings_query = Mock()
+    mock_hearings_options = Mock()
     mock_hearings_filter = Mock()
     mock_hearings_order = Mock()
-    mock_hearings_query.filter.return_value = mock_hearings_filter
+    mock_hearings_query.options.return_value = mock_hearings_options
+    mock_hearings_options.filter.return_value = mock_hearings_filter
     mock_hearings_filter.order_by.return_value = mock_hearings_order
     mock_hearings_order.all.return_value = []
 
     mock_entities_query = Mock()
+    mock_entities_options = Mock()
     mock_entities_filter = Mock()
-    mock_entities_query.filter.return_value = mock_entities_filter
+    mock_entities_query.options.return_value = mock_entities_options
+    mock_entities_options.filter.return_value = mock_entities_filter
     mock_entities_filter.all.return_value = []
 
     mock_session.query.side_effect = [
@@ -212,24 +226,30 @@ def test_case_number_normalization(mock_normalize, mock_session, mock_case):
 
 def test_no_normalization_when_disabled(mock_session, mock_case):
     """Test that normalization can be disabled."""
-    # Setup mock query chain
+    # Setup mock query chain with options
     mock_query = Mock()
+    mock_options = Mock()
     mock_filter = Mock()
-    mock_query.filter.return_value = mock_filter
+    mock_query.options.return_value = mock_options
+    mock_options.filter.return_value = mock_filter
     mock_filter.first.return_value = mock_case
     mock_session.query.return_value = mock_query
 
     # Mock hearings and entities queries
     mock_hearings_query = Mock()
+    mock_hearings_options = Mock()
     mock_hearings_filter = Mock()
     mock_hearings_order = Mock()
-    mock_hearings_query.filter.return_value = mock_hearings_filter
+    mock_hearings_query.options.return_value = mock_hearings_options
+    mock_hearings_options.filter.return_value = mock_hearings_filter
     mock_hearings_filter.order_by.return_value = mock_hearings_order
     mock_hearings_order.all.return_value = []
 
     mock_entities_query = Mock()
+    mock_entities_options = Mock()
     mock_entities_filter = Mock()
-    mock_entities_query.filter.return_value = mock_entities_filter
+    mock_entities_query.options.return_value = mock_entities_options
+    mock_entities_options.filter.return_value = mock_entities_filter
     mock_entities_filter.all.return_value = []
 
     mock_session.query.side_effect = [
