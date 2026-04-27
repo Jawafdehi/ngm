@@ -8,26 +8,10 @@ from ngm.utils.case_normalizer import normalize_case_number
 
 
 class CourtCaseService:
-    """Service for retrieving court case data.
+    """Service for retrieving court case data from Nepal's court system.
 
-    Example usage:
-        from ngm.api import CourtCaseService
-
-        # Create service instance
-        service = CourtCaseService()
-
-        # Query a case
-        case = service.get_case_detail("supreme", "081-CR-0081")
-
-        if case:
-            print(f"Case: {case.case_number}")
-            print(f"Plaintiff: {case.plaintiff}")
-            print(f"Defendant: {case.defendant}")
-            print(f"Hearings: {len(case.hearings)}")
-            print(f"Entities: {len(case.entities)}")
-
-        # Close when done
-        service.close()
+    Supports case number normalization and automatic session management.
+    See examples/api_usage.py for usage examples.
     """
 
     def __init__(self, session: Optional[Session] = None):
@@ -70,10 +54,7 @@ class CourtCaseService:
             normalize: Whether to normalize the case number (default: True)
 
         Returns:
-            CourtCase object with hearings and entities loaded, or None if not found.
-            Note: The returned objects are detached from the session. Accessing
-            lazy-loaded relationships (like case.court) after the service is closed
-            will raise DetachedInstanceError.
+            CourtCase with hearings and entities, or None if not found.
         """
         # Normalize case number if requested
         if normalize:

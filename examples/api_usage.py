@@ -1,5 +1,30 @@
 #!/usr/bin/env python
-"""Example demonstrating how to use the NGM library to query court cases."""
+"""Example demonstrating how to use the NGM library to query court cases.
+
+Basic Usage:
+    from ngm.api import CourtCaseService
+
+    # Create service instance
+    service = CourtCaseService()
+
+    # Query a case
+    case = service.get_case_detail("supreme", "081-CR-0081")
+
+    if case:
+        print(f"Case: {case.case_number}")
+        print(f"Plaintiff: {case.plaintiff}")
+        print(f"Defendant: {case.defendant}")
+        print(f"Hearings: {len(case.hearings)}")
+        print(f"Entities: {len(case.entities)}")
+
+    # Close when done
+    service.close()
+
+    # Or use context manager for automatic cleanup
+    with CourtCaseService() as service:
+        case = service.get_case_detail("supreme", "081-CR-0081")
+        # Process case...
+"""
 
 from ngm.api import CourtCaseService
 
