@@ -29,14 +29,18 @@ def _split_parties(text: str) -> List[str]:
     # Remove 'समेत' (and others) suffix
     text = text.replace("समेत", "").strip()
 
-    # Split by comma
-    parties = [p.strip() for p in text.split(",") if p.strip()]
+    # Split by slash first, then by comma
+    slash_parts = [p.strip() for p in text.split("/") if p.strip()]
 
-    # If no commas, return as single party
-    if not parties:
-        return [text] if text else []
+    parties = []
+    for part in slash_parts:
+        comma_parts = [p.strip() for p in part.split(",") if p.strip()]
+        if comma_parts:
+            parties.extend(comma_parts)
+        elif part:
+            parties.append(part)
 
-    return parties
+    return parties if parties else ([text] if text else [])
 
 
 def parse_basic_info_table(soup: BeautifulSoup) -> Dict:
@@ -369,6 +373,21 @@ class SupremeCaseEnrichmentSpider(scrapy.Spider):
         case_number = request.meta.get("case_number")
 
         self.logger.error(f"Error enriching case {case_number}: {failure.value}")
+
+        with self.session.begin():
+            case = (
+                self.session.query(CourtCase)
+                .filter(
+                    and_(
+                        CourtCase.case_number == case_number,
+                        CourtCase.court_identifier == COURT_ID,
+                    )
+                )
+                .first()
+            )
+            if case:
+                case.status = "failed"
+                case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
 
     def parse_search_results(self, response):
         """Parse search results and extract detail link"""
