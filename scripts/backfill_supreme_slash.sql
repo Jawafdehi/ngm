@@ -1,5 +1,12 @@
 BEGIN;
 
+-- Capture affected case numbers before any mutations for final summary
+CREATE TEMP TABLE _affected_supreme_cases AS
+SELECT DISTINCT case_number
+FROM court_case_entities
+WHERE court_identifier = 'supreme'
+  AND name LIKE '%/%';
+
 -- PRE-FLIGHT CHECK 1: Confirm degenerate rows (names starting with /)
 -- These 24 rows will be handled separately below
 SELECT id, case_number, side, name
@@ -28,13 +35,13 @@ AND trim(split_part(name, '/', 1)) != '';
 -- nes_id cleared since combined string was never a valid entity
 UPDATE court_case_entities
 SET
-    name = trim(substring(name FROM 2)),
+    name = trim(regexp_replace(name, '^\s*/+\s*', '')),
     nes_id = NULL,
     updated_at = now() AT TIME ZONE 'Asia/Kathmandu'
 WHERE court_identifier = 'supreme'
 AND name LIKE '%/%'
 AND trim(split_part(name, '/', 1)) = ''
-AND trim(substring(name FROM 2)) != '';
+AND trim(regexp_replace(name, '^\s*/+\s*', '')) != '';
 
 -- STEP 3: Insert new rows for all names after the first (normal rows)
 -- nes_id explicitly NULL so split rows are resolved independently
@@ -84,10 +91,8 @@ SELECT case_number, side, name, COUNT(*) AS row_count
 FROM court_case_entities
 WHERE court_identifier = 'supreme'
 AND case_number IN (
-    SELECT DISTINCT case_number
-    FROM court_case_entities
-    WHERE court_identifier = 'supreme'
-    AND name LIKE '%/%'
+    SELECT case_number
+    FROM _affected_supreme_cases
 )
 GROUP BY case_number, side, name
 ORDER BY case_number, side, name;
