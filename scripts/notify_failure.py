@@ -3,6 +3,7 @@ import requests
 import json
 import sys
 
+
 def notify():
     webhook_url = os.getenv("NOTIFY_WEBHOOK_URL")
     if not webhook_url:
@@ -12,7 +13,7 @@ def notify():
     job_name = os.getenv("GITHUB_JOB_NAME", "NGM Scraper")
     run_id = os.getenv("GITHUB_RUN_ID", "N/A")
     repository = os.getenv("GITHUB_REPOSITORY", "Jawafdehi/ngm")
-    
+
     status = sys.argv[1] if len(sys.argv) > 1 else "FAILED"
     reason = sys.argv[2] if len(sys.argv) > 2 else "Unknown error"
 
@@ -26,6 +27,7 @@ def notify():
         print("Notification sent successfully")
     except Exception as e:
         print(f"Failed to send notification: {e}")
+
 
 if __name__ == "__main__":
     notify()

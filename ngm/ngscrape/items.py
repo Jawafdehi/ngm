@@ -1,5 +1,6 @@
 import scrapy
 
+
 class BlacklistedFirmItem(scrapy.Item):
     firm_name = scrapy.Field()
     proprietor_name = scrapy.Field()
@@ -12,7 +13,7 @@ class BlacklistedFirmItem(scrapy.Item):
     reason = scrapy.Field()
     recommending_office = scrapy.Field()
     source_url = scrapy.Field()
-    
+
     # NES mapping fields
     entity_type = scrapy.Field()
     entity_sub_type = scrapy.Field()

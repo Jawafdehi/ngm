@@ -355,7 +355,9 @@ class BlacklistedFirm(Base):
     )
 
     def __repr__(self):
-        return f"<BlacklistedFirm(name={self.firm_name}, until={self.effective_until_bs})>"
+        return (
+            f"<BlacklistedFirm(name={self.firm_name}, until={self.effective_until_bs})>"
+        )
 
 
 # Indexes for performance
@@ -495,7 +497,7 @@ def get_engine(database_url=None):
                 "DATABASE_URL not provided and not found in environment variables. "
                 "Please set DATABASE_URL or pass database_url parameter."
             )
-            
+
     # If engine already exists, assert URL is the same
     if _engine is not None:
         assert _engine_url == database_url, (

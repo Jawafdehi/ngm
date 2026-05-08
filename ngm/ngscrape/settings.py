@@ -26,7 +26,7 @@ ENABLE_CAPTCHA_COOKIE_EXTRACT = True
 TELNETCONSOLE_ENABLED = False
 
 EXTENSIONS = {
-   "ngm.ngscrape.extensions.SchemaChangeDetector": 500,
+    "ngm.ngscrape.extensions.SchemaChangeDetector": 500,
 }
 
 FEED_EXPORT_ENCODING = "utf-8"

@@ -555,38 +555,46 @@ class PPMOBlacklistPipeline(FilesPipeline):
         """Save metadata and log results."""
         # PPMO doesn't have PDFs to download in the current implementation,
         # but we use FilesPipeline to get access to self.store for S3/R2.
-        
+
         firm_name = item.get("firm_name", "")
         blacklist_date_bs = item.get("blacklist_date_bs", "")
-        
+
         # Create a unique-ish filename
         safe_name = self._safe_filename(firm_name)
         json_filename = f"{blacklist_date_bs}_{safe_name}.json"
-        
-        json_file_path = posixpath.join(
-            "ppmo", "blacklist", "metadata", json_filename
-        )
-        
+
+        json_file_path = posixpath.join("ppmo", "blacklist", "metadata", json_filename)
+
         metadata = {
             "firm_name": firm_name,
             "proprietor_name": item.get("proprietor_name"),
             "address": item.get("address"),
             "blacklist_date_bs": blacklist_date_bs,
-            "blacklist_date_ad": item.get("blacklist_date_ad").isoformat() if item.get("blacklist_date_ad") else None,
+            "blacklist_date_ad": (
+                item.get("blacklist_date_ad").isoformat()
+                if item.get("blacklist_date_ad")
+                else None
+            ),
             "effective_until_bs": item.get("effective_until_bs"),
-            "effective_until_ad": item.get("effective_until_ad").isoformat() if item.get("effective_until_ad") else None,
+            "effective_until_ad": (
+                item.get("effective_until_ad").isoformat()
+                if item.get("effective_until_ad")
+                else None
+            ),
             "duration": item.get("duration"),
             "reason": item.get("reason"),
             "recommending_office": item.get("recommending_office"),
             "source_url": item.get("source_url"),
         }
-        
+
         json_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
-        
+
         try:
             self.store.persist_file(json_file_path, BytesIO(json_bytes), info)
             info.spider.logger.info(f"Saved PPMO metadata: {json_file_path}")
         except Exception:
-            info.spider.logger.exception(f"Failed to save PPMO metadata {json_file_path}")
-            
+            info.spider.logger.exception(
+                f"Failed to save PPMO metadata {json_file_path}"
+            )
+
         return item

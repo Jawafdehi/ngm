@@ -479,9 +479,7 @@ class IndexBuilder:
             manuscripts=all_manuscripts,
         )
 
-    def _process_ppmo_blacklist_metadata(
-        self, metadata_path
-    ) -> Manuscript:
+    def _process_ppmo_blacklist_metadata(self, metadata_path) -> Manuscript:
         """Process a single PPMO blacklist metadata file and return a manuscript."""
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -515,7 +513,9 @@ class IndexBuilder:
         if not metadata_paths:
             return None
 
-        logger.info("ppmo-blacklist: processing %d metadata files...", len(metadata_paths))
+        logger.info(
+            "ppmo-blacklist: processing %d metadata files...", len(metadata_paths)
+        )
 
         manuscripts = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
