@@ -1,0 +1,41 @@
+name: OAG Report Parser
+
+on:
+  workflow_dispatch:
+    inputs:
+      report_url:
+        description: 'URL of the OAG Report PDF'
+        required: true
+        default: 'https://oag.gov.np/downloadfile/Annual-Report-61.pdf'
+
+env:
+  POETRY_VERSION: '2.3.2'
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: Install poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+        
+      - name: Run OAG report parser
+        run: poetry run python scripts/oag_parser.py "${{ github.event.inputs.report_url }}" "OAG_Report.md"
+        
+      - name: Upload Markdown artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oag-markdown
+          path: OAG_Report.md
