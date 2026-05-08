@@ -17,9 +17,9 @@ from sqlalchemy import (
     ForeignKey,
     create_engine,
     Index,
+    JSON,
 )
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
-from sqlalchemy.dialects.postgresql import JSONB
 
 Base = declarative_base()
 
@@ -181,7 +181,7 @@ class CourtCase(Base):
     # Tracks whether detailed case information has been scraped
 
     # Additional data (case-specific metadata)
-    extra_data = Column(JSONB, nullable=True)
+    extra_data = Column(JSON, nullable=True)
 
     def __repr__(self):
         return f"<CourtCase(case_number={self.case_number}, court={self.court_identifier})>"
@@ -268,7 +268,7 @@ class CourtCaseHearing(Base):
     # - status: Multi-line status field (high courts)
     # - footer: Court officer details
     # - Any other court-specific fields
-    extra_data = Column(JSONB, nullable=True)
+    extra_data = Column(JSON, nullable=True)
 
     def __repr__(self):
         return f"<CourtCaseHearing(case_number={self.case_number}, hearing_date={self.hearing_date_bs})>"
@@ -495,7 +495,7 @@ def get_engine(database_url=None):
                 "DATABASE_URL not provided and not found in environment variables. "
                 "Please set DATABASE_URL or pass database_url parameter."
             )
-
+            
     # If engine already exists, assert URL is the same
     if _engine is not None:
         assert _engine_url == database_url, (
