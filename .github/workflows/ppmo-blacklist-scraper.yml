@@ -35,6 +35,11 @@ jobs:
         run: poetry run scrapy crawl ppmo_blacklist
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AWS_ENDPOINT_URL: 'https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: 'auto'
+          FILES_STORE: 's3://ngm/uploads/'
 
       - name: Notify on failure
         if: failure()
