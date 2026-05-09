@@ -17,9 +17,9 @@ from sqlalchemy import (
     ForeignKey,
     create_engine,
     Index,
-    JSON,
 )
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
+from sqlalchemy.dialects.postgresql import JSONB
 
 Base = declarative_base()
 
@@ -181,7 +181,7 @@ class CourtCase(Base):
     # Tracks whether detailed case information has been scraped
 
     # Additional data (case-specific metadata)
-    extra_data = Column(JSON, nullable=True)
+    extra_data = Column(JSONB, nullable=True)
 
     def __repr__(self):
         return f"<CourtCase(case_number={self.case_number}, court={self.court_identifier})>"
@@ -268,7 +268,7 @@ class CourtCaseHearing(Base):
     # - status: Multi-line status field (high courts)
     # - footer: Court officer details
     # - Any other court-specific fields
-    extra_data = Column(JSON, nullable=True)
+    extra_data = Column(JSONB, nullable=True)
 
     def __repr__(self):
         return f"<CourtCaseHearing(case_number={self.case_number}, hearing_date={self.hearing_date_bs})>"
@@ -319,45 +319,6 @@ class CaseEntity(Base):
 
     def __repr__(self):
         return f"<CaseEntity(case_number={self.case_number}, side={self.side}, name={self.name})>"
-
-
-class BlacklistedFirm(Base):
-    """
-    Table storing blacklisted firms from PPMO (Public Procurement Monitoring Office).
-    """
-
-    __tablename__ = "blacklisted_firms"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    firm_name = Column(String(500), nullable=False, index=True)
-    proprietor_name = Column(String(500), nullable=True)
-    address = Column(String(500), nullable=True)
-
-    blacklist_date_bs = Column(String(20), nullable=True)
-    blacklist_date_ad = Column(Date, nullable=True, index=True)
-
-    effective_until_bs = Column(String(20), nullable=True)
-    effective_until_ad = Column(Date, nullable=True, index=True)
-
-    duration = Column(String(100), nullable=True)
-    reason = Column(Text, nullable=True)
-    recommending_office = Column(String(500), nullable=True)
-
-    # External entity resolution
-    nes_id = Column(String(100), nullable=True, index=True)
-
-    # Audit fields
-    scraped_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
-
-    def __repr__(self):
-        return (
-            f"<BlacklistedFirm(name={self.firm_name}, until={self.effective_until_bs})>"
-        )
 
 
 # Indexes for performance

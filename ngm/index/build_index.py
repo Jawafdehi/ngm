@@ -190,7 +190,6 @@ class IndexBuilder:
             self._build_ciaa_annual_reports_node,
             self._build_ciaa_press_releases_node,
             self._build_court_orders_node,
-            self._build_ppmo_blacklist_node,
         )
 
         # Each builder scans S3 independently — run them concurrently.
@@ -477,69 +476,6 @@ class IndexBuilder:
             name="ciaa-press-releases",
             path="/ciaa-press-releases",
             manuscripts=all_manuscripts,
-        )
-
-    def _process_ppmo_blacklist_metadata(self, metadata_path) -> Manuscript:
-        """Process a single PPMO blacklist metadata file and return a manuscript."""
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            raise ValueError(
-                f"ppmo-blacklist: malformed JSON in {metadata_path.name}: {e}"
-            ) from e
-
-        if not isinstance(metadata, dict):
-            raise ValueError(
-                f"ppmo-blacklist: {metadata_path.name} is not a JSON object"
-            )
-
-        # PPMO currently doesn't have a PDF, so we use a placeholder or just the metadata
-        # For now, we'll use a placeholder URL or the source URL if available
-        return Manuscript(
-            url=metadata.get("source_url", ""),
-            file_name=metadata_path.name,
-            metadata=metadata,
-        )
-
-    def _build_ppmo_blacklist_node(self) -> IndexNode | None:
-        """Build PPMO blacklist node with metadata."""
-        metadata_dir = self._build_folder_structure("ppmo", "blacklist", "metadata")
-
-        if not metadata_dir.exists():
-            return None
-
-        metadata_paths = sorted(metadata_dir.glob("*.json"), key=lambda p: p.name)
-
-        if not metadata_paths:
-            return None
-
-        logger.info(
-            "ppmo-blacklist: processing %d metadata files...", len(metadata_paths)
-        )
-
-        manuscripts = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_path = {
-                executor.submit(self._process_ppmo_blacklist_metadata, path): path
-                for path in metadata_paths
-            }
-
-            for future in concurrent.futures.as_completed(future_to_path):
-                path = future_to_path[future]
-                try:
-                    ms = future.result()
-                    manuscripts.append(ms)
-                except Exception:
-                    logger.exception("ppmo-blacklist: failed to process %s", path.name)
-                    raise
-
-        # Sort by date (filename starts with date)
-        manuscripts.sort(key=lambda m: m.file_name, reverse=True)
-
-        return IndexNode(
-            name="ppmo-blacklist",
-            path="/ppmo-blacklist",
-            manuscripts=manuscripts,
         )
 
     def _build_court_orders_node(self) -> IndexNode | None:
