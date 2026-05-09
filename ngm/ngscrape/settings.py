@@ -28,9 +28,6 @@ LOG_LEVEL = "INFO"
 SPIDER_MODULES = ["ngm.ngscrape.spiders"]
 NEWSPIDER_MODULE = "ngm.ngscrape.spiders"
 
-ADDONS = {}
-
-
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -91,6 +88,9 @@ TELNETCONSOLE_ENABLED = False
 # EXTENSIONS = {
 #    "scrapy.extensions.telnet.TelnetConsole": None,
 # }
+EXTENSIONS = {
+    "ngm.ngscrape.extensions.SchemaChangeDetector": 500,
+}
 
 # Configure item pipelines
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
