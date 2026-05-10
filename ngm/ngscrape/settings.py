@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from ngm.logging import setup as setup_logging  # noqa: E402
+
+setup_logging()
+
 FILES_STORE = os.getenv("FILES_STORE", "output")
 
 logging.getLogger("protego._protego").setLevel(logging.INFO)
@@ -82,6 +86,9 @@ TELNETCONSOLE_ENABLED = False
 # DOWNLOADER_MIDDLEWARES = {
 #    "ngscrape.middlewares.NgscrapeDownloaderMiddleware": 543,
 # }
+DOWNLOADER_MIDDLEWARES = {
+    "ngm.ngscrape.middlewares.ScrapyRequestIDMiddleware": 100,
+}
 
 # Enable or disable extensions
 # See https://docs.scrapy.org/en/latest/topics/extensions.html
