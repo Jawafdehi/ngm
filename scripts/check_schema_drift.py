@@ -12,17 +12,17 @@ def check():
     engine = create_engine(db_url)
     try:
         with engine.connect() as conn:
-            # Check if we have cases with null titles or other expected fields
+            # Check if we have cases with null case_type or other expected fields
             # suggesting a selector failure (schema drift)
             result = conn.execute(
                 text(
-                    "SELECT count(*) FROM court_cases WHERE title IS NULL OR title = ''"
+                    "SELECT count(*) FROM court_cases WHERE case_type IS NULL OR case_type = ''"
                 )
             )
             count = result.scalar()
             if count > 10:  # Threshold for drift detection
                 print(
-                    f"ERROR: Detected {count} cases with missing titles. Possible schema drift!"
+                    f"ERROR: Detected {count} cases with missing case_type. Possible schema drift!"
                 )
                 sys.exit(1)
             print("Schema check passed")
