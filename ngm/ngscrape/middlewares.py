@@ -1,2 +1,1 @@
-# Custom spider middleware for ngscrape
-# Add custom middleware classes here as needed
+from ngm.middleware import ScrapyRequestIDMiddleware  # noqa: F401
