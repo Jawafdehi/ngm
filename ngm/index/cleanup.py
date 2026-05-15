@@ -72,15 +72,23 @@ def _delete_old_indices(indices_path: AnyPath) -> int:
         )
 
     if not delete:
-        logger.info("No indices to delete (%d total, keeping up to %d)", len(dated), MAX_KEEP)
+        logger.info(
+            "No indices to delete (%d total, keeping up to %d)", len(dated), MAX_KEEP
+        )
         return 0
 
-    logger.info("Deleting %d old index director%s beyond the %d-run retention window",
-                len(delete), "ies" if len(delete) != 1 else "y", MAX_KEEP)
+    logger.info(
+        "Deleting %d old index director%s beyond the %d-run retention window",
+        len(delete),
+        "ies" if len(delete) != 1 else "y",
+        MAX_KEEP,
+    )
 
     deleted = 0
     for _, entry in sorted(delete, key=lambda p: p[0]):
-        logger.info("Deleting expired index directory: %s (date: %s)", entry.name, entry.name)
+        logger.info(
+            "Deleting expired index directory: %s (date: %s)", entry.name, entry.name
+        )
         try:
             entry.rmtree()
             deleted += 1
@@ -111,7 +119,11 @@ def main() -> None:
     if deleted == 0:
         logger.info("Cleanup complete — nothing to delete")
     else:
-        logger.info("Cleanup complete — deleted %d expired index director%s", deleted, "ies" if deleted != 1 else "y")
+        logger.info(
+            "Cleanup complete — deleted %d expired index director%s",
+            deleted,
+            "ies" if deleted != 1 else "y",
+        )
 
 
 if __name__ == "__main__":

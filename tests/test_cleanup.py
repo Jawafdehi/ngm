@@ -12,7 +12,6 @@ from ngm.index.cleanup import (
     _parse_date_from_dirname,
     _list_date_dirs,
     _delete_old_indices,
-    MAX_KEEP,
 )
 
 
@@ -149,7 +148,7 @@ class TestDeleteOldIndices:
         entries[0].rmtree.assert_called_once()  # 05-01
         entries[1].rmtree.assert_called_once()  # 05-02
         entries[2].rmtree.assert_called_once()  # 05-03
-        entries[3].rmtree.assert_not_called()   # 05-04 (kept)
+        entries[3].rmtree.assert_not_called()  # 05-04 (kept)
 
     def test_no_indices_dir_returns_zero(self):
         indices_path = MagicMock()
@@ -184,8 +183,7 @@ class TestDeleteOldIndices:
 
     def test_all_expired(self):
         entries = [
-            self._make_mock_entry(f"2026-05-{d:02d}")
-            for d in range(1, 9)  # 8 entries
+            self._make_mock_entry(f"2026-05-{d:02d}") for d in range(1, 9)  # 8 entries
         ]
         indices_path = MagicMock()
         indices_path.exists.return_value = True
