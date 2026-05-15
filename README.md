@@ -146,3 +146,4 @@ This approach ensures efficient data collection while respecting server resource
 **License**: [Hippocratic License 3.0](./LICENSE) — an [Ethical Source](https://ethicalsource.dev) license. See [LICENSING.md](./LICENSING.md) for rationale.
 
 **Contact**: For questions or collaboration opportunities, please reach out through the Jawafdehi project channels.
+# JAWA-1048
