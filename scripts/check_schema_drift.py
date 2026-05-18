@@ -1,6 +1,7 @@
 import os
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 import sys
+from ngm.database.models import get_engine
 
 
 def check():
@@ -9,7 +10,7 @@ def check():
         print("DATABASE_URL not set")
         sys.exit(1)
 
-    engine = create_engine(db_url)
+    engine = get_engine(db_url)
     try:
         with engine.connect() as conn:
             # Check if we have cases with null case_type or other expected fields

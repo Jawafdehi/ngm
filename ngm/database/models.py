@@ -472,12 +472,34 @@ _engine = None
 _engine_url = None
 
 
+def _build_ssl_connect_args():
+    """
+    Build SSL connect_args from environment variables for TLS/SSL database connections.
+
+    Reads PGSSLMODE and PGSSLROOTCERT environment variables and returns a dict
+    suitable for passing as connect_args to SQLAlchemy's create_engine().
+
+    Returns:
+        dict: SSL connect_args dict (empty if no SSL env vars are set)
+    """
+    connect_args = {}
+    if os.getenv("PGSSLMODE"):
+        connect_args["sslmode"] = os.getenv("PGSSLMODE")
+    if os.getenv("PGSSLROOTCERT"):
+        connect_args["sslrootcert"] = os.getenv("PGSSLROOTCERT")
+    return connect_args
+
+
 def get_engine(database_url=None):
     """
     Get or create database engine (singleton pattern).
 
     Returns the same engine instance across calls. Once an engine is created,
     all subsequent calls must use the same database URL.
+
+    SSL/TLS is configured via environment variables:
+        PGSSLMODE: e.g., "verify-ca", "require", "disable"
+        PGSSLROOTCERT: path to CA certificate file
 
     Args:
         database_url: PostgreSQL connection string. If None, reads from DATABASE_URL env var.
@@ -511,8 +533,9 @@ def get_engine(database_url=None):
         )
         return _engine
 
-    # Create new engine
-    _engine = create_engine(database_url, echo=False)
+    # Create new engine with SSL connect_args
+    connect_args = _build_ssl_connect_args()
+    _engine = create_engine(database_url, connect_args=connect_args, echo=False)
     _engine_url = database_url
 
     return _engine

@@ -20,7 +20,8 @@ import sys
 import re
 import getpass
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from ngm.database.models import get_engine
 
 
 def validate_username(username):
@@ -255,7 +256,7 @@ def main():
     # Connect to database
     print("\n🔌 Connecting to database...")
     try:
-        engine = create_engine(database_url, echo=False)
+        engine = get_engine(database_url)
         # Test connection
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
