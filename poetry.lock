@@ -1038,14 +1038,14 @@ files = [
 
 [[package]]
 name = "nepali"
-version = "1.1.3"
+version = "1.2.0"
 description = "nepalidatetime compatible with python's datetime feature. Converting nepali date to english, parsing nepali datetime, nepali timezone, and timedelta support in nepali datetime"
 optional = false
-python-versions = "*"
+python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "nepali-1.1.3-py3-none-any.whl", hash = "sha256:e1e2259e0bb0325cef400b361142e2337182ced3e9d5f2e2e6c356380129841a"},
-    {file = "nepali-1.1.3.tar.gz", hash = "sha256:779bcd282da1b1583bf71d675355b2ad0bff6031a457dc8fd2ee7aaf969ff946"},
+    {file = "nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1"},
+    {file = "nepali-1.2.0.tar.gz", hash = "sha256:75a9d0bd4b3e95d72c7045539b63e84077686ffa12dff5db3fffe6579cbb511d"},
 ]
 
 [[package]]
@@ -2239,4 +2239,4 @@ testing = ["coverage[toml]", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "1e7eb8e2ca5829cb456504d92f4939f8931d900289061d1ac1bb0a91a1755e80"
+content-hash = "833d76fb90819afa85253306d97db7498e3cd736df1a123f5ee41159d3977217"
