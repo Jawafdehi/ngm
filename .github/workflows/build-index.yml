@@ -14,6 +14,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Start Cloud SQL Proxy
+        uses: Jawafdehi/gce-cloudsql-proxy-action@master
+        with:
+          creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          instance: ${{ secrets.CLOUD_SQL_INSTANCE }}
+          port: 5432
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -37,5 +44,5 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: 'auto'
           NGM_STORE_BASE_URL: https://ngm-store.jawafdehi.org
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_PROXY }}
         run: poetry run python -m ngm.index.build_index

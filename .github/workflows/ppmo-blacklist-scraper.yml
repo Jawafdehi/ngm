@@ -13,28 +13,35 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     environment: 'NGM Scrape'
-    
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      
+
+      - name: Start Cloud SQL Proxy
+        uses: Jawafdehi/gce-cloudsql-proxy-action@master
+        with:
+          creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          instance: ${{ secrets.CLOUD_SQL_INSTANCE }}
+          port: 5432
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.12'
-          
+
       - name: Install poetry
         run: |
           curl -sSL https://install.python-poetry.org | python3 -
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          
+
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-        
+
       - name: Run PPMO blacklist scraper
         working-directory: ./ngm
         run: poetry run scrapy crawl ppmo_blacklist
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_PROXY }}
           AWS_ENDPOINT_URL: 'https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com'
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

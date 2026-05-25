@@ -18,6 +18,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Start Cloud SQL Proxy
+        uses: Jawafdehi/gce-cloudsql-proxy-action@master
+        with:
+          creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          instance: ${{ secrets.CLOUD_SQL_INSTANCE }}
+          port: 5432
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -47,7 +54,7 @@ jobs:
         # 600 cases/hour x 5 hours = 3000 cases per job (1-hour buffer for overhead)
         run: poetry run scrapy crawl supreme_court_orders -a limit=3000
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_PROXY }}
           ENABLE_CAPTCHA_COOKIE_EXTRACT: "True"
           AWS_ENDPOINT_URL: 'https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com'
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
