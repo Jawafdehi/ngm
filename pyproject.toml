@@ -19,7 +19,7 @@ pytz = "^2025.2"
 cloudpathlib = {extras = ["s3"], version = "^0.24.0"}
 pydantic = "^2.0"
 rapidfuzz = "^3.0"
-google-genai = "^2.4.0"
+google-genai = "^2.7.0"
 sentry-sdk = {extras = ["structlog"], version = "^2.47.0"}
 structlog = "^25.5.0"
 
