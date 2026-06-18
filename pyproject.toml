@@ -8,7 +8,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.12"
 scrapy = "^2.16.0"
-beautifulsoup4 = "^4.14.3"
+beautifulsoup4 = "^4.15.0"
 python-dateutil = "^2.9.0.post0"
 nepali = "^1.2.0"
 boto3 = "^1.43.32"
