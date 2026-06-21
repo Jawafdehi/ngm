@@ -616,14 +616,14 @@ urllib3 = ["packaging", "urllib3"]
 
 [[package]]
 name = "google-genai"
-version = "2.8.0"
+version = "2.9.0"
 description = "GenAI Python SDK"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "google_genai-2.8.0-py3-none-any.whl", hash = "sha256:4da0a223a100f4b37f609a68b835e3326ab0fa313314dc0fd9d34e76ee293844"},
-    {file = "google_genai-2.8.0.tar.gz", hash = "sha256:37a9b3cb127d763e7f4ca47452ae3562c87728773bd1b149f7b559c239da2bc1"},
+    {file = "google_genai-2.9.0-py3-none-any.whl", hash = "sha256:2a79e2b08e8439f5f25c2b42f98e3f3e8ea4be9c9265f5d7321580dbaf2764f4"},
+    {file = "google_genai-2.9.0.tar.gz", hash = "sha256:a8a10e9113f460cc668c1d9deeb62ba393ad1ba704bf3166d5a0f32a434f9415"},
 ]
 
 [package.dependencies]
@@ -631,7 +631,7 @@ anyio = ">=4.8.0,<5.0.0"
 distro = ">=1.7.0,<2"
 google-auth = {version = ">=2.48.1,<3.0.0", extras = ["requests"]}
 httpx = ">=0.28.1,<1.0.0"
-pydantic = ">=2.9.0,<3.0.0"
+pydantic = ">=2.12.5,<3.0.0"
 requests = ">=2.28.1,<3.0.0"
 sniffio = "*"
 tenacity = ">=8.2.3,<9.2.0"
@@ -640,7 +640,7 @@ websockets = ">=13.0.0,<17.0"
 
 [package.extras]
 aiohttp = ["aiohttp (>=3.10.11,<4.0.0)"]
-local-tokenizer = ["protobuf", "sentencepiece (>=0.2.0)"]
+local-tokenizer = ["pillow", "protobuf", "sentencepiece (>=0.2.0)", "torch", "torchvision", "transformers"]
 pyopenssl = ["pyopenssl"]
 
 [[package]]
@@ -2245,4 +2245,4 @@ testing = ["coverage[toml]", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "d0ec5ede5a7de189cc230773a472fbd111613346ba5aeb677224d3ebe0ac58b0"
+content-hash = "dd7f2cac9e179f19777172986ffc2aeebbe52bc3653d08c56a1f3951a7f61cce"
