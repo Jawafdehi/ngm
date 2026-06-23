@@ -156,7 +156,7 @@ class SupremeCourtCasesSpider(scrapy.Spider):
 
         return "\n".join(judge_names) if judge_names else None
 
-    def start_requests(self):
+    async def start(self):
         now_ktm = datetime.now(KATHMANDU_TZ)
         end_date = now_ktm.date() - timedelta(days=SCRAPE_OFFSET_DAYS)
         start_date = end_date - timedelta(days=SCRAPE_LOOKBACK_DAYS_SUPREME_COURT)

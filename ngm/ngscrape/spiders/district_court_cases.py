@@ -49,7 +49,7 @@ class DistrictCourtCasesSpider(scrapy.Spider):
         "RETRY_PRIORITY_ADJUST": -1,
     }
 
-    def start_requests(self):
+    async def start(self):
         """Generate requests for all district courts"""
         self.engine = get_engine()
         init_db(self.engine)

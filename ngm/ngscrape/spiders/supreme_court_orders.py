@@ -330,7 +330,7 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
         self.logger.info(f"Found {len(result)} cases to scrape")
         return result
 
-    def start_requests(self):
+    async def start(self):
         if not self.settings.getbool("ENABLE_CAPTCHA_COOKIE_EXTRACT", False):
             from scrapy.exceptions import CloseSpider
 
@@ -372,7 +372,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
 
         self.total_cases = len(self._pending_cases)
         self.logger.info(f"Starting to process {self.total_cases} cases")
-        yield from self._next_request()
+        for request in self._next_request():
+            yield request
 
     def _next_request(self):
         """Yield a homepage GET for the next pending case."""

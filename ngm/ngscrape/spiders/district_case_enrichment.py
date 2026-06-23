@@ -113,7 +113,7 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
             "yes",
         )
 
-    def start_requests(self):
+    async def start(self):
         """Generate requests for cases that need enrichment"""
         self.engine = get_engine()
         init_db(self.engine)
