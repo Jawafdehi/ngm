@@ -29,6 +29,12 @@ TIMEZONE = "Asia/Kathmandu"
 # Set log level
 LOG_LEVEL = "INFO"
 
+# Logging is owned by ngm.logging.setup() (structlog). Disable Scrapy's own
+# logging install so it doesn't add a competing root handler; combined with
+# routing scrapy loggers through the root structlog handler (see ngm/logging.py)
+# this keeps Scrapy's framework logs (spider open/close, stats, errors) visible.
+LOG_ENABLED = False
+
 SPIDER_MODULES = ["ngm.ngscrape.spiders"]
 NEWSPIDER_MODULE = "ngm.ngscrape.spiders"
 
