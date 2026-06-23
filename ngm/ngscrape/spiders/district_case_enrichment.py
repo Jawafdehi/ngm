@@ -102,8 +102,16 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
         # "DOWNLOAD_DELAY": 2,  # 2 second delay between requests
     }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, backfill_case_type=False, **kwargs):
         super().__init__(*args, **kwargs)
+        # Opt-in one-off mode (`-a backfill_case_type=true`) that also revisits
+        # already-enriched rows missing a case_type. Off by default so nightly
+        # runs never re-fetch permanently-typeless rows in a loop.
+        self.backfill_case_type = str(backfill_case_type).lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
     def start_requests(self):
         """Generate requests for cases that need enrichment"""
@@ -111,29 +119,34 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
         init_db(self.engine)
         self.session = get_session(self.engine)
 
+        needs_enrichment = or_(
+            CourtCase.status == "pending",
+            CourtCase.status.is_(None),
+        )
+        if self.backfill_case_type:
+            # Revisit already-enriched rows whose case_type never got populated:
+            # the daily cause-list only carries the (often blank) "मुद्दा विषय"
+            # subject column, so these need the detail page's "मुद्दाको किसिम".
+            needs_enrichment = or_(
+                needs_enrichment,
+                and_(
+                    CourtCase.status == "enriched",
+                    or_(
+                        CourtCase.case_type.is_(None),
+                        CourtCase.case_type == "",
+                    ),
+                ),
+            )
+
         # Query all district court cases that need enrichment in one go
-        # Priority: newer registration dates first, status = pending or NULL
+        # Priority: newer registration dates first.
         with self.session.begin():
             cases_to_enrich = (
                 self.session.query(CourtCase.case_number, CourtCase.court_identifier)
                 .filter(
                     and_(
                         CourtCase.court_identifier.like("%dc"),
-                        or_(
-                            CourtCase.status == "pending",
-                            CourtCase.status.is_(None),
-                            # Revisit already-enriched rows whose case_type never
-                            # got populated: the daily cause-list only carries the
-                            # (often blank) "मुद्दा विषय" subject column, so these
-                            # need the detail page's "मुद्दाको किसिम" to backfill.
-                            and_(
-                                CourtCase.status == "enriched",
-                                or_(
-                                    CourtCase.case_type.is_(None),
-                                    CourtCase.case_type == "",
-                                ),
-                            ),
-                        ),
+                        needs_enrichment,
                     )
                 )
                 .order_by(CourtCase.registration_date_ad.desc().nullslast())
@@ -269,27 +282,25 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
                 self.logger.warning(f"Case {case_number} not found in database")
                 return
 
-            already_enriched = case.status == "enriched"
-            has_case_type = bool(case.case_type)
-
-        if already_enriched:
-            if has_case_type:
-                self.logger.info(f"Case {case_number} already enriched, skipping")
+            if case.status == "enriched":
+                if case.case_type:
+                    self.logger.info(f"Case {case_number} already enriched, skipping")
+                    return
+                # Already enriched but missing case_type: backfill just that field
+                # from the detail page without re-touching entities/hearings (whose
+                # rebuild deletes rows that may have downstream linkages).
+                case_type = self._extract_enrichment_data(soup).get("case_type")
+                if case_type:
+                    case.case_type = case_type[:200]
+                    case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
+                    self.logger.info(
+                        f"Backfilled case_type for {case_number} ({code_name}): {case_type}"
+                    )
+                else:
+                    self.logger.info(
+                        f"Case {case_number} ({code_name}) has no case_type on detail page"
+                    )
                 return
-            # Already enriched but missing case_type: backfill just that field
-            # from the detail page without re-touching entities/hearings (whose
-            # rebuild deletes rows that may have downstream linkages).
-            case_type = self._extract_enrichment_data(soup).get("case_type")
-            if case_type:
-                self._backfill_case_type(case_number, code_name, case_type)
-                self.logger.info(
-                    f"Backfilled case_type for {case_number} ({code_name}): {case_type}"
-                )
-            else:
-                self.logger.info(
-                    f"Case {case_number} ({code_name}) has no case_type on detail page"
-                )
-            return
 
         # Extract enrichment data
         enrichment_data = self._extract_enrichment_data(soup)
@@ -428,26 +439,6 @@ class DistrictCaseEnrichmentSpider(scrapy.Spider):
                             data["timeline"] = parse_timeline_table(table)
 
         return data
-
-    def _backfill_case_type(self, case_number: str, code_name: str, case_type: str):
-        """Set case_type on an already-enriched case, leaving everything else."""
-        now = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
-
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter(
-                    and_(
-                        CourtCase.case_number == case_number,
-                        CourtCase.court_identifier == code_name,
-                    )
-                )
-                .first()
-            )
-
-            if case and not case.case_type:
-                case.case_type = case_type[:200]
-                case.updated_at = now
 
     def _save_enrichment(
         self,
