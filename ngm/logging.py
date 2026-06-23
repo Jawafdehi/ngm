@@ -53,28 +53,20 @@ def configure_logging():
 
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
+    # Enforce the level on the handler too: Scrapy resets the root logger level
+    # to NOTSET when it initialises, so the handler is what actually filters.
+    handler.setLevel(log_level)
 
     root_logger = logging.getLogger()
     root_logger.handlers = [handler]
     root_logger.setLevel(log_level)
 
-    for _log_name in [
-        "scrapy",
-        "scrapy.core.engine",
-        "scrapy.downloadermiddlewares",
-        "scrapy.extensions",
-        "scrapy.spidermiddlewares",
-        "scrapy.utils.signal",
-        "protego._protego",
-        "sqlalchemy",
-        "sqlalchemy.engine",
-        "boto3",
-        "botocore",
-        "urllib3",
-    ]:
-        logger = logging.getLogger(_log_name)
-        logger.handlers = [handler]
-        logger.propagate = False
+    # Route everything through the single root handler above. We deliberately do
+    # NOT pin per-library handlers with propagate=False: Scrapy's startup runs
+    # dictConfig(DEFAULT_LOGGING), which strips handlers off the `scrapy` logger.
+    # With propagate=False that left `scrapy` (and its children's) records with
+    # nowhere to go, silently dropping all of Scrapy's framework logs (spider
+    # open/close, stats, errors). Letting them propagate to root keeps them.
 
 
 def init_sentry():
