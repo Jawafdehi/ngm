@@ -314,7 +314,7 @@ class SupremeCaseEnrichmentSpider(scrapy.Spider):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def start_requests(self):
+    async def start(self):
         """Generate requests for cases that need enrichment"""
         self.engine = get_engine()
         init_db(self.engine)
