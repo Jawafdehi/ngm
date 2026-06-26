@@ -69,6 +69,8 @@ def order_document_sources(
     Returns:
         A list with one DocumentSource dict, or ``[]`` if there are no files.
     """
+    if not file_paths:
+        return []
     base = get_store_base_url(base_url)
     file_urls = [f"{base}/{p.lstrip('/')}" for p in file_paths if p]
     links = file_links(file_urls)

@@ -76,6 +76,7 @@ def test_order_document_sources_strips_leading_slash():
 def test_order_document_sources_empty_paths():
     assert order_document_sources("supreme", "082-WO-0001", []) == []
     assert order_document_sources("supreme", "082-WO-0001", [None, ""]) == []
+    assert order_document_sources("supreme", "082-WO-0001", None) == []  # no TypeError
 
 
 def test_get_store_base_url_default_and_override(monkeypatch):

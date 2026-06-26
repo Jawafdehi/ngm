@@ -44,10 +44,10 @@ def main():
                     session.query(CourtCase)
                     .filter(
                         CourtCase.extra_data["court_orders"].isnot(None),
-                        tuple_(CourtCase.court_identifier, CourtCase.case_number)
+                        tuple_(CourtCase.case_number, CourtCase.court_identifier)
                         > last,
                     )
-                    .order_by(CourtCase.court_identifier, CourtCase.case_number)
+                    .order_by(CourtCase.case_number, CourtCase.court_identifier)
                     .limit(BATCH)
                     .all()
                 )
@@ -68,12 +68,13 @@ def main():
                         c.document_sources = ds
                         updated += 1
                     else:
-                        # has court_orders but no usable paths — store [] so this
-                        # row is not re-scanned forever (keyset already prevents
-                        # loops, but [] keeps the semantics unambiguous).
-                        c.document_sources = []
+                        # has court_orders but no usable paths (defensive — should
+                        # not happen on real data). Use None to match the pipeline
+                        # and model contract (one canonical "no sources" value);
+                        # keyset pagination means this row isn't re-scanned.
+                        c.document_sources = None
                         empty += 1
-                last = (batch[-1].court_identifier, batch[-1].case_number)
+                last = (batch[-1].case_number, batch[-1].court_identifier)
             print(
                 f"...scanned={scanned} updated={updated} skipped={skipped} empty={empty}",
                 flush=True,
