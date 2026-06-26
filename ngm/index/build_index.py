@@ -1450,6 +1450,10 @@ def main() -> None:
     and bulk-uploaded + synced to R2 once at the end (fast local disk, one upload
     pass, stale remote objects pruned). With a local FILES_STORE the tree is
     written in place (no staging/publish) — used by tests and serve_test_index.
+
+    Set ``NGM_DRY_RUN=1`` to build from the (cloud) read store to local staging
+    with NO writes back — no R2 publish and no DB sync — so a real rebuild can be
+    measured/inspected with read-only access to the store.
     """
     files_store_env = os.getenv("FILES_STORE")
     if not files_store_env:
@@ -1460,9 +1464,14 @@ def main() -> None:
     base_url = get_base_url()
     date_str = datetime.now().strftime("%Y-%m-%d")
     remote = files_store.startswith("s3://")
+    # Dry run: build the full tree from the (possibly cloud) read store to local
+    # staging, but make NO writes back to the store — no R2 publish, no DB sync.
+    # This lets a real build be measured/inspected with read-only access to R2.
+    dry_run = os.getenv("NGM_DRY_RUN", "").lower() in ("1", "true", "yes")
 
-    # Build to local staging when publishing to a cloud store; pinned dirs (set
-    # via env) are left in place, ad-hoc temp dirs are cleaned up in finally.
+    # Build to local staging when reading from a cloud store; pinned dirs (set
+    # via env) are left in place, ad-hoc temp dirs are cleaned up in finally
+    # (a dry-run keeps the staging dir so its output can be inspected).
     pinned_staging = os.getenv("INDEX_STAGING_DIR")
     staging_dir = None
     output_path = None
@@ -1470,7 +1479,9 @@ def main() -> None:
         staging_dir = pinned_staging or tempfile.mkdtemp(prefix="ngm-index-")
         output_path = staging_dir
 
-    logger.info("Building index ....")
+    logger.info(
+        "Building index ....%s", "  [DRY RUN — no publish/DB]" if dry_run else ""
+    )
     logger.info("Files store (read): %s", files_store)
     logger.info("Output (write): %s", output_path or files_store)
     logger.info("Base URL: %s", base_url)
@@ -1517,6 +1528,14 @@ def main() -> None:
         # prunes documents that vanished since an earlier run on the same day.
         build_id = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        if dry_run:
+            logger.info(
+                "DRY RUN: %d documents built to %s — skipping DB sync and publish.",
+                total_docs,
+                builder.output_root,
+            )
+            return
+
         if _db_index_enabled():
             from ngm.index.db_index import sync_document_sources
 
@@ -1552,7 +1571,8 @@ def main() -> None:
 
         logger.info("Index build completed successfully")
     finally:
-        if staging_dir and not pinned_staging:
+        # Keep the staging dir on a dry run so its output can be inspected.
+        if staging_dir and not pinned_staging and not dry_run:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
 
