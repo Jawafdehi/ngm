@@ -169,6 +169,18 @@ class CourtCase(Base):
     verdict_judge = Column(String(500), nullable=True)
     # Judge who gave the verdict
 
+    verdict_type = Column(String(100), nullable=True)
+    # Example: "फैसला", "आदेश" — kind of the final decision (supreme)
+
+    case_subject = Column(Text, nullable=True)
+    # मुद्दाको बिषय — full case subject text (district/supreme detail pages)
+
+    hearing_count = Column(String(20), nullable=True)
+    # पेशी चढेको संख्या — number of times the case reached a hearing
+
+    enriched_at = Column(DateTime, nullable=True, index=True)
+    # When the detail page was successfully scraped (distinct from updated_at)
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
@@ -533,9 +545,13 @@ def get_engine(database_url=None):
         )
         return _engine
 
-    # Create new engine with SSL connect_args
+    # Create new engine with SSL connect_args. pool_pre_ping recycles a stale
+    # connection (e.g. one the server dropped while idle) instead of erroring on
+    # first use — important for the long-running scrapers against CNPG.
     connect_args = _build_ssl_connect_args()
-    _engine = create_engine(database_url, connect_args=connect_args, echo=False)
+    _engine = create_engine(
+        database_url, connect_args=connect_args, echo=False, pool_pre_ping=True
+    )
     _engine_url = database_url
 
     return _engine

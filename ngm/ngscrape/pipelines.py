@@ -397,10 +397,17 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
             # Recent case — soft skip, pipeline will re-check in TOO_RECENT_RECHECK_DAYS days
             self._mark_too_recent(info.spider, case_number, court_identifier)
             # Not a failure — do not increment failed_cases
+        elif spider_error in ("no_docs_old_case", "no_records_old_case"):
+            # Spider-emitted permanent reasons: the site genuinely has no document
+            # for an old, decided case. Exclude from future runs.
+            self._mark_failed(info.spider, case_number, court_identifier, spider_error)
+            info.spider.failed_cases += 1
         else:
-            # Everything else: no docs on old case (no_docs_old_case), S3 download fail → permanent
+            # Transient: a FilesPipeline download/upload failure (FileException /
+            # timeout / S3 error) or any other unrecognised condition. Do NOT mark
+            # orders_failed — leave the case re-crawlable so the next run retries it.
             error = spider_error or "; ".join(failed_results) or "Unknown failure"
-            self._mark_failed(info.spider, case_number, court_identifier, error)
+            self._mark_transient(info.spider, case_number, court_identifier, error)
             info.spider.failed_cases += 1
 
         return item
@@ -454,6 +461,9 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 case.extra_data.pop("orders_failed_at", None)
                 case.extra_data.pop("orders_too_recent", None)
                 case.extra_data.pop("orders_too_recent_checked_at", None)
+                case.extra_data.pop("orders_transient_error", None)
+                case.extra_data.pop("orders_transient_at", None)
+                case.extra_data.pop("orders_transient_retries", None)
 
                 # Mark field as modified for SQLAlchemy JSONB tracking
                 flag_modified(case, "extra_data")
@@ -501,6 +511,63 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 )
         except Exception:
             spider.logger.exception(f"[{case_number}] Error marking too_recent")
+            raise
+
+    MAX_TRANSIENT_RETRIES = 5
+
+    def _mark_transient(self, spider, case_number, court_identifier, error):
+        """Transient failure (download/S3/timeout) — NON-terminal.
+
+        Does not set orders_failed, so the selection query still re-picks the
+        case next run. Tracks a retry counter and only escalates to a permanent
+        failure after MAX_TRANSIENT_RETRIES so a genuinely-dead URL eventually
+        stops being re-queued.
+        """
+        try:
+            with self.session.begin():
+                case = (
+                    self.session.query(CourtCase)
+                    .filter_by(
+                        case_number=case_number, court_identifier=court_identifier
+                    )
+                    .first()
+                )
+                if not case:
+                    spider.logger.error(
+                        f"[{case_number}] Not in DB. Cannot mark transient."
+                    )
+                    return
+                if case.extra_data is None:
+                    case.extra_data = {}
+
+                retries = int(case.extra_data.get("orders_transient_retries", 0)) + 1
+                case.extra_data["orders_transient_retries"] = retries
+                case.extra_data["orders_transient_error"] = error
+                case.extra_data["orders_transient_at"] = self._now_iso()
+                # A transient path must never leave a stale permanent flag.
+                case.extra_data.pop("orders_failed", None)
+                case.extra_data.pop("orders_error", None)
+                case.extra_data.pop("orders_failed_at", None)
+
+                if retries >= self.MAX_TRANSIENT_RETRIES:
+                    case.extra_data["orders_failed"] = True
+                    case.extra_data["orders_error"] = (
+                        f"transient_exhausted after {retries} retries: {error}"
+                    )
+                    case.extra_data["orders_failed_at"] = self._now_iso()
+                    spider.logger.error(
+                        f"[{case_number}] Transient retries exhausted ({retries}) "
+                        "— marking permanent."
+                    )
+                else:
+                    spider.logger.warning(
+                        f"[{case_number}] Transient download failure "
+                        f"(retry {retries}/{self.MAX_TRANSIENT_RETRIES}) — "
+                        "will retry next run."
+                    )
+                flag_modified(case, "extra_data")
+        except Exception:
+            spider.logger.exception(f"[{case_number}] Error marking transient")
             raise
 
     def _mark_failed(self, spider, case_number, court_identifier, error):

@@ -1,238 +1,152 @@
 """High Court Case Enrichment Spider.
 
-Enriches existing high court cases with detailed information from case detail pages.
-Processes cases from all 18 high courts that have status='pending' or status=NULL.
+Enriches existing high court cases with detailed information from case detail
+pages. Processes cases from the 18 high courts with status pending/NULL.
 """
 
-import os
-from datetime import datetime
 from typing import Dict, List
 
-import pytz
-import scrapy
-from bs4 import BeautifulSoup
 from scrapy.http import FormRequest
-from sqlalchemy import and_, or_
-from sqlalchemy.orm.attributes import flag_modified
+from bs4 import BeautifulSoup
 
-from ngm.database.models import CaseEntity, CourtCase, get_engine, get_session, init_db
+from ngm.ngscrape.base_spiders import (
+    BaseCaseEnrichmentSpider,
+    CourtCase,
+    convert_bs_to_ad,
+)
 from ngm.utils.court_ids import HIGH_COURTS
-from ngm.utils.db_helpers import convert_bs_to_ad
 from ngm.utils.normalizer import normalize_date, normalize_whitespace
 
-KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
-
-class HighCourtEnrichmentSpider(scrapy.Spider):
+class HighCourtEnrichmentSpider(BaseCaseEnrichmentSpider):
     name = "high_court_enrichment"
-
-    custom_settings = {
-        "RETRY_ENABLED": True,
-        "RETRY_TIMES": 3,
-        "RETRY_HTTP_CODES": [500, 502, 503, 504, 408, 429],
-        "CONCURRENT_REQUESTS": 4,
-    }
 
     def __init__(self, court=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        court_identifiers = [c["identifier"] for c in HIGH_COURTS]
-
-        # Validate court identifier if provided
-        if court is not None and court not in court_identifiers:
+        identifiers = [c["identifier"] for c in HIGH_COURTS]
+        if court is not None and court not in identifiers:
             raise ValueError(
-                f"Invalid court identifier: {court}. "
-                f"Valid identifiers are: {', '.join(court_identifiers)}"
+                f"Invalid court identifier: {court}. Valid: {', '.join(identifiers)}"
             )
-
-        self.courts = [court] if court else court_identifiers
-
+        self.courts = [court] if court else identifiers
         self.success_count = 0
         self.failed_count = 0
-
         self.logger.info(f"Initialized for courts: {self.courts}")
 
-    async def start(self):
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            error_msg = "No database URL found. Set DATABASE_URL environment variable."
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
+    def court_filter(self):
+        return CourtCase.court_identifier.in_(self.courts)
 
-        try:
-            self.engine = get_engine(db_url)
-            init_db(self.engine)
-            self.session = get_session(self.engine)
-
-            cases = self._fetch_cases()
-            if not cases:
-                self.logger.info("No cases to enrich")
-                return
-
-            for case_number, court_identifier in cases:
-                url = (
-                    f"https://supremecourt.gov.np/court/{court_identifier}/case_details"
-                )
-
-                yield FormRequest(
-                    url=url,
-                    method="POST",
-                    formdata={"case_no": case_number},
-                    callback=self.parse_case_detail,
-                    meta={
-                        "court_identifier": court_identifier,
-                        "case_number": case_number,
-                    },
-                    dont_filter=True,
-                    errback=self.handle_error,
-                )
-        except Exception:
-            # Ensure session cleanup on error
-            if hasattr(self, "session") and self.session:
-                self.session.close()
-            raise
-
-    def _fetch_cases(self):
-        with self.session.begin():
-            cases = (
-                self.session.query(CourtCase.case_number, CourtCase.court_identifier)
-                .filter(
-                    and_(
-                        CourtCase.court_identifier.in_(self.courts),
-                        or_(
-                            CourtCase.status == "pending",
-                            CourtCase.status.is_(None),
-                        ),
-                    )
-                )
-                .order_by(CourtCase.registration_date_ad.desc().nullslast())
-                .all()
-            )
-
-        self.logger.info(f"Fetched {len(cases)} cases for enrichment")
-        return cases
+    def build_request(self, case_number, court_identifier):
+        return FormRequest(
+            url=f"https://supremecourt.gov.np/court/{court_identifier}/case_details",
+            method="POST",
+            formdata={"case_no": case_number},
+            callback=self.parse_case_detail,
+            meta={"court_identifier": court_identifier, "case_number": case_number},
+            dont_filter=True,
+            errback=self.handle_error,
+        )
 
     def handle_error(self, failure):
-        case_number = failure.request.meta.get("case_number")
-        court_identifier = failure.request.meta.get("court_identifier")
-
-        self.logger.error(f"Request failed for {case_number}: {failure.value}")
         self.failed_count += 1
-        self._mark_as_failed(case_number, court_identifier)
+        super().handle_error(failure)
 
     def parse_case_detail(self, response):
         case_number = response.meta["case_number"]
         court_identifier = response.meta["court_identifier"]
-
         self.logger.info(f"Processing {case_number} from {court_identifier}")
 
         if "Request Rejected" in response.text:
             self.logger.error(f"WAF rejection for {case_number}")
             self.failed_count += 1
-            self._mark_as_failed(case_number, court_identifier)
+            self.mark_failed(case_number, court_identifier)
             return
 
         soup = BeautifulSoup(response.text, "html.parser")
-
-        enrichment_result = self._extract_enrichment_data(soup)
+        result = self._extract_enrichment_data(soup)
         entities = self._extract_entities(soup)
         hearings = self._extract_hearings(soup)
+        core_fields = result["core_fields"]
+        extra_data = result["extra_data"]
 
-        self.logger.info(
-            f"Extracted: {len(enrichment_result['core_fields'])} core fields, "
-            f"{len(enrichment_result['extra_data'])} extra fields, "
-            f"{len(entities['plaintiffs'])} plaintiffs, "
-            f"{len(entities['defendants'])} defendants, "
-            f"{len(hearings)} hearings"
-        )
-
-        # If no entities extracted, add raw वादीहरु/प्रतिवादीहरु to extra_data as fallback
-        if len(entities["plaintiffs"]) == 0 and len(entities["defendants"]) == 0:
-            self.logger.warning(
-                f"No entities extracted for {case_number}, adding raw data to extra_fields"
-            )
-            # Re-extract raw वादीहरु/प्रतिवादीहरु from soup
-            rows = soup.find_all("div", class_="row")
-            for row in rows:
+        # If structured entities couldn't be parsed, stash the raw party text.
+        if not entities["plaintiffs"] and not entities["defendants"]:
+            for row in soup.find_all("div", class_="row"):
                 cols = row.find_all("div", class_="col-xs-6")
-                if len(cols) == 2:
-                    label_elem = cols[0].find("strong")
-                    value_elem = cols[1].find("p")
-                    if label_elem and value_elem:
-                        label = normalize_whitespace(label_elem.get_text())
-                        value = normalize_whitespace(value_elem.get_text())
-                        if "वादी" in label and "प्रतिवादी" not in label and value:
-                            enrichment_result["extra_data"]["वादीहरु"] = value
-                        elif "प्रतिवादी" in label and value:
-                            enrichment_result["extra_data"]["प्रतिवादीहरु"] = value
+                if len(cols) != 2:
+                    continue
+                label_elem = cols[0].find("strong")
+                value_elem = cols[1].find("p")
+                if not label_elem or not value_elem:
+                    continue
+                label = normalize_whitespace(label_elem.get_text())
+                value = normalize_whitespace(value_elem.get_text())
+                if "वादी" in label and "प्रतिवादी" not in label and value:
+                    extra_data["वादीहरु"] = value
+                elif "प्रतिवादी" in label and value:
+                    extra_data["प्रतिवादीहरु"] = value
 
-        # Only mark as failed if we got absolutely nothing
         has_data = (
-            enrichment_result["core_fields"]
-            or enrichment_result["extra_data"]
+            core_fields
+            or extra_data
             or entities["plaintiffs"]
             or entities["defendants"]
             or hearings
         )
-
         if not has_data:
-            self.logger.warning(
-                f"No data extracted for {case_number} - no core fields, extra data, entities, or hearings"
-            )
+            self.logger.warning(f"No data extracted for {case_number}")
             self.failed_count += 1
-            self._mark_as_failed(case_number, court_identifier)
+            self.mark_failed(case_number, court_identifier)
             return
 
-        success = self._save_enrichment(
-            case_number,
-            court_identifier,
-            enrichment_result["core_fields"],
-            enrichment_result["extra_data"],
-            entities,
-            hearings,
-            response.url,
-        )
+        extra = {
+            **extra_data,
+            "source_url": response.url,
+            "enrichment_hearings": hearings,
+        }
+        try:
+            saved = self.save_enrichment(
+                case_number, court_identifier, core_fields, extra, entities
+            )
+        except Exception:
+            self.logger.exception(f"Failed to save enrichment for {case_number}")
+            self.failed_count += 1
+            self.mark_failed(case_number, court_identifier)
+            return
 
-        if success:
+        if saved:
             self.success_count += 1
             self.logger.info(f"Successfully enriched {case_number}")
         else:
-            self.logger.error(
-                f"Failed to save enrichment for {case_number} from {court_identifier}"
-            )
-            self._mark_as_failed(case_number, court_identifier)
+            self.failed_count += 1
+            self.mark_failed(case_number, court_identifier)
 
     def _extract_enrichment_data(self, soup: BeautifulSoup) -> Dict:
         core_fields = {}
         extra_data = {}
 
-        rows = soup.find_all("div", class_="row")
-
-        for row in rows:
+        for row in soup.find_all("div", class_="row"):
             cols = row.find_all("div", class_="col-xs-6")
             if len(cols) != 2:
                 continue
-
             label_elem = cols[0].find("strong")
             value_elem = cols[1].find("p")
-
             if not label_elem or not value_elem:
                 continue
 
-            label = normalize_whitespace(label_elem.get_text()).rstrip(":").strip()
+            # Strip trailing ':' AND '.' — the portal labels carry a trailing dot
+            # (e.g. "दर्ता नँ.") which previously dumped these into extra_data
+            # under raw keys instead of the typed columns.
+            label = normalize_whitespace(label_elem.get_text()).rstrip(":.").strip()
             value = normalize_whitespace(value_elem.get_text())
-
             if not value or value == "--":
                 continue
-
-            # Skip वादीहरु and प्रतिवादीहरु - already extracted as entities
             if "वादी" in label or "प्रतिवादी" in label:
                 continue
 
-            # Core database fields
             if label == "दर्ता नँ":
                 core_fields["registration_number"] = value[:100]
-            elif label == "दर्ता मिति":
+            elif label in ("दर्ता मिति", "दर्ता मिती"):
                 core_fields["registration_date_bs"] = normalize_date(value)
                 try:
                     core_fields["registration_date_ad"] = convert_bs_to_ad(
@@ -240,31 +154,27 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                     )
                 except Exception:
                     self.logger.exception(
-                        f"Failed to convert registration_date_bs to AD: "
-                        f"value={value}, label={label}, field=registration_date_ad"
+                        f"Failed to convert registration_date_bs: {value!r}"
                     )
             elif label == "मुद्दाको किसिम":
                 core_fields["case_type"] = value[:200]
                 extra_data["case_type_display"] = value
-            elif label == "मुद्दाको स्थिति":
+            elif label in ("मुद्दाको स्थिति", "मुद्दाको स्थिती"):
                 core_fields["case_status"] = value[:100]
                 extra_data["raw_status_display"] = value
-            elif label == "फैसला मिति":
-                core_fields["verdict_date_bs"] = normalize_date(value)
+            elif label in ("फैसला मिति", "फैसला मिती"):
                 if value != "**** ** **":
+                    core_fields["verdict_date_bs"] = normalize_date(value)
                     try:
                         core_fields["verdict_date_ad"] = convert_bs_to_ad(
                             normalize_date(value)
                         )
                     except Exception:
                         self.logger.exception(
-                            f"Failed to convert verdict_date_bs to AD: "
-                            f"value={value}, label={label}, field=verdict_date_ad"
+                            f"Failed to convert verdict_date_bs: {value!r}"
                         )
             elif label == "फैसला गर्ने न्यायाधीश":
                 core_fields["verdict_judge"] = value[:500]
-
-            # Extra data fields
             elif label == "रुजु मिती":
                 extra_data["review_date"] = value
             elif label == "फाँटवाला":
@@ -275,135 +185,86 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             elif label == "अदालत":
                 extra_data["court_name"] = value
             else:
-                key = label.replace(" ", "_").replace(":", "")
-                extra_data[key] = value
+                extra_data[label.replace(" ", "_").replace(":", "")] = value
 
         return {"core_fields": core_fields, "extra_data": extra_data}
 
     def _extract_entities(self, soup: BeautifulSoup) -> Dict[str, List[Dict]]:
         entities = {"plaintiffs": [], "defendants": []}
 
-        # Try Format 1: Panel-based structure (with separate panels and address columns)
         plaintiff_panel = None
+        defendant_panel = None
         for panel in soup.find_all("div", class_="panel-heading"):
-            if "वादीको विवरण" in panel.get_text():
+            text = panel.get_text()
+            if plaintiff_panel is None and "वादीको विवरण" in text:
                 plaintiff_panel = panel
-                break
+            elif defendant_panel is None and "प्रतिवादीहरु" in text:
+                defendant_panel = panel
 
-        if plaintiff_panel:
-            plaintiff_body = plaintiff_panel.find_next("div", class_="panel-body")
-
-            if plaintiff_body:
-                rows = plaintiff_body.find_all("div", class_="row")
-                # Skip header row (first row with "नाम" and "ठेगाना")
-                for row in rows[1:]:
-                    cols = row.find_all("div", recursive=False)
-                    if len(cols) >= 2:
-                        name = normalize_whitespace(cols[0].get_text())
-                        address = (
-                            normalize_whitespace(cols[1].get_text())
-                            if len(cols) > 1
-                            else None
-                        )
-
-                        if name and name != "नाम":
-                            if address and address.strip():
-                                address = address[:500]
-                            else:
-                                address = None
-                            entities["plaintiffs"].append(
-                                {"name": name[:500], "address": address}
-                            )
-
-            # Find defendant panel
-            defendant_panel = None
-            for panel in soup.find_all("div", class_="panel-heading"):
-                if "प्रतिवादीहरु" in panel.get_text():
-                    defendant_panel = panel
-                    break
-
+        # Format 1: panel-based (with address columns). Each side is searched
+        # independently, so a defendant panel is found even with no plaintiff panel.
+        if plaintiff_panel or defendant_panel:
+            if plaintiff_panel:
+                self._parse_panel(plaintiff_panel, entities["plaintiffs"])
             if defendant_panel:
-                defendant_body = defendant_panel.find_next("div", class_="panel-body")
+                self._parse_panel(defendant_panel, entities["defendants"])
+            return entities
 
-                if defendant_body:
-                    rows = defendant_body.find_all("div", class_="row")
-                    for row in rows[1:]:
-                        cols = row.find_all("div", recursive=False)
-                        if len(cols) >= 2:
-                            name = normalize_whitespace(cols[0].get_text())
-                            address = (
-                                normalize_whitespace(cols[1].get_text())
-                                if len(cols) > 1
-                                else None
-                            )
-
-                            if name and name != "नाम":
-                                if address and address.strip():
-                                    address = address[:500]
-                                else:
-                                    address = None
-                                entities["defendants"].append(
-                                    {"name": name[:500], "address": address}
-                                )
-
-        else:
-            # Format 2: Simple row-based structure (वादीहरु/प्रतिवादीहरु in col-xs-6 rows)
-            rows = soup.find_all("div", class_="row")
-
-            for row in rows:
-                cols = row.find_all("div", class_="col-xs-6")
-                if len(cols) != 2:
-                    continue
-
-                label_elem = cols[0].find("strong")
-                value_elem = cols[1].find("p")
-
-                if not label_elem or not value_elem:
-                    continue
-
-                label = normalize_whitespace(label_elem.get_text())
-                value = normalize_whitespace(value_elem.get_text())
-
-                if not value or value == "--":
-                    continue
-
-                if "वादी" in label and "प्रतिवादी" not in label:
-                    # Split plaintiffs by comma or slash
-                    if "," in value:
-                        plaintiff_names = [name.strip() for name in value.split(",")]
-                    else:
-                        plaintiff_names = [name.strip() for name in value.split("/")]
-                    for name in plaintiff_names:
-                        if name:
-                            entities["plaintiffs"].append(
-                                {"name": name[:500], "address": None}
-                            )
-
-                elif "प्रतिवादी" in label:
-                    # Split defendants by comma or slash
-                    if "," in value:
-                        defendant_names = [name.strip() for name in value.split(",")]
-                    else:
-                        defendant_names = [name.strip() for name in value.split("/")]
-                    for name in defendant_names:
-                        if name:
-                            entities["defendants"].append(
-                                {"name": name[:500], "address": None}
-                            )
+        # Format 2: simple row-based (वादीहरु / प्रतिवादीहरु in col-xs-6 rows).
+        for row in soup.find_all("div", class_="row"):
+            cols = row.find_all("div", class_="col-xs-6")
+            if len(cols) != 2:
+                continue
+            label_elem = cols[0].find("strong")
+            value_elem = cols[1].find("p")
+            if not label_elem or not value_elem:
+                continue
+            label = normalize_whitespace(label_elem.get_text())
+            value = normalize_whitespace(value_elem.get_text())
+            if not value or value == "--":
+                continue
+            if "वादी" in label and "प्रतिवादी" not in label:
+                target = entities["plaintiffs"]
+            elif "प्रतिवादी" in label:
+                target = entities["defendants"]
+            else:
+                continue
+            names = value.split(",") if "," in value else value.split("/")
+            for name in names:
+                name = name.strip()
+                if name:
+                    target.append({"name": name[:500], "address": None})
 
         return entities
 
+    @staticmethod
+    def _parse_panel(panel, target):
+        body = panel.find_next("div", class_="panel-body")
+        if not body:
+            return
+        # Skip the header row (नाम / ठेगाना).
+        for row in body.find_all("div", class_="row")[1:]:
+            cols = row.find_all("div", recursive=False)
+            if len(cols) < 2:
+                continue
+            name = normalize_whitespace(cols[0].get_text())
+            address = normalize_whitespace(cols[1].get_text())
+            if name and name != "नाम":
+                target.append(
+                    {
+                        "name": name[:500],
+                        "address": (
+                            address[:500] if address and address.strip() else None
+                        ),
+                    }
+                )
+
     def _extract_hearings(self, soup: BeautifulSoup) -> List[Dict]:
         hearings = []
-        tables = soup.find_all("table", class_="table")
-
-        for table in tables:
+        for table in soup.find_all("table", class_="table"):
             headers = [normalize_whitespace(h.get_text()) for h in table.find_all("th")]
-
             if "सुनवाइ" in " ".join(headers):
-                rows = table.find_all("tr")[1:]
-
-                for row in rows:
+                for row in table.find_all("tr")[1:]:
                     cells = row.find_all("td")
                     if len(cells) >= 4:
                         hearings.append(
@@ -421,131 +282,7 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
                             }
                         )
                 break
-
         return hearings
-
-    def _save_enrichment(
-        self,
-        case_number,
-        court_identifier,
-        core_fields,
-        extra_metadata,
-        entities,
-        hearings,
-        source_url,
-    ):
-        now = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
-
-        try:
-            with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter(
-                        and_(
-                            CourtCase.case_number == case_number,
-                            CourtCase.court_identifier == court_identifier,
-                        )
-                    )
-                    .first()
-                )
-
-                if not case:
-                    self.logger.error(f"Case {case_number} not found in database")
-                    self.failed_count += 1
-                    return False
-
-                # Update core fields
-                for key, value in core_fields.items():
-                    setattr(case, key, value)
-
-                self.logger.debug(f"Updated core fields: {list(core_fields.keys())}")
-
-                # Update extra_data
-                if case.extra_data is None:
-                    case.extra_data = {}
-
-                extra_metadata["source_url"] = source_url
-                extra_metadata["enrichment_hearings"] = hearings
-                case.extra_data.update(extra_metadata)
-                flag_modified(case, "extra_data")
-
-                case.status = "enriched"
-                case.enriched_at = now
-                case.updated_at = now
-
-                # Update entities - only delete plaintiff/defendant sides managed by this spider
-                deleted = (
-                    self.session.query(CaseEntity)
-                    .filter(
-                        and_(
-                            CaseEntity.case_number == case_number,
-                            CaseEntity.court_identifier == court_identifier,
-                            CaseEntity.side.in_(["plaintiff", "defendant"]),
-                        )
-                    )
-                    .delete(synchronize_session=False)
-                )
-
-                if deleted > 0:
-                    self.logger.debug(f"Deleted {deleted} old entities")
-
-                for plaintiff in entities["plaintiffs"]:
-                    self.session.add(
-                        CaseEntity(
-                            case_number=case_number,
-                            court_identifier=court_identifier,
-                            side="plaintiff",
-                            name=plaintiff["name"],
-                            address=None,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-
-                for defendant in entities["defendants"]:
-                    self.session.add(
-                        CaseEntity(
-                            case_number=case_number,
-                            court_identifier=court_identifier,
-                            side="defendant",
-                            name=defendant["name"],
-                            address=None,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-
-                self.logger.debug(
-                    f"Saved {len(entities['plaintiffs'])} plaintiffs, "
-                    f"{len(entities['defendants'])} defendants"
-                )
-
-            return True
-
-        except Exception:
-            self.logger.exception(f"Failed to save enrichment for {case_number}")
-            self.failed_count += 1
-            return False
-
-    def _mark_as_failed(self, case_number: str, court_identifier: str):
-        try:
-            with self.session.begin():
-                case = (
-                    self.session.query(CourtCase)
-                    .filter(
-                        and_(
-                            CourtCase.case_number == case_number,
-                            CourtCase.court_identifier == court_identifier,
-                        )
-                    )
-                    .first()
-                )
-
-                if case:
-                    case.status = "failed"
-                    case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
-        except Exception:
-            self.logger.exception("Failed to mark case as failed")
 
     def closed(self, reason):
         self.logger.info("=" * 60)
@@ -554,6 +291,5 @@ class HighCourtEnrichmentSpider(scrapy.Spider):
             f"Results: {self.success_count} enriched, {self.failed_count} failed"
         )
         self.logger.info("=" * 60)
-
         if hasattr(self, "session") and self.session:
             self.session.close()

@@ -1,51 +1,40 @@
 """
 Special Court Case Enrichment Spider
 
-Enriches existing special court cases with detailed information from case detail pages.
-Loops through all special court cases and enriches cases that need detailed information.
-
+Enriches existing special court cases with detailed information from case detail
+pages.
 URL: https://supremecourt.gov.np/special/syspublic.php?d=reports&f=case_details
-POST params: syy, smm, sdd, mode=show, regno (case number), submit
 """
 
-import scrapy
-from datetime import datetime
 from typing import List, Dict
+
 from scrapy.http import FormRequest
 from bs4 import BeautifulSoup
-import pytz
-from sqlalchemy import and_, or_
-from sqlalchemy.orm.attributes import flag_modified
-from ngm.utils.normalizer import (
-    normalize_whitespace,
-    normalize_date,
-)
-from ngm.database.models import get_engine, get_session, init_db, CourtCase, CaseEntity
-from ngm.utils.db_helpers import convert_bs_to_ad
 
-KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
+from ngm.ngscrape.base_spiders import (
+    BaseCaseEnrichmentSpider,
+    CourtCase,
+    convert_bs_to_ad,
+)
+from ngm.utils.normalizer import normalize_whitespace, normalize_date
+
 COURT_ID = "special"
 
 
 def parse_hearing_table(table) -> List[Dict[str, str]]:
     """Parse hearing schedule table (पेशी को विवरण)."""
     hearings = []
-    rows = table.find_all("tr")[1:]  # Skip header row
-
-    for row in rows:
+    for row in table.find_all("tr")[1:]:
         cells = row.find_all("td")
         if len(cells) >= 4:
-            # Extract judge names (may be multiple, separated by <br>)
             judge_cell = cells[1]
             for br in judge_cell.find_all("br"):
                 br.replace_with("\n")
-            judge_text = judge_cell.get_text()
             judge_names = [
                 normalize_whitespace(line)
-                for line in judge_text.split("\n")
+                for line in judge_cell.get_text().split("\n")
                 if line.strip()
             ]
-
             hearings.append(
                 {
                     "hearing_date": normalize_date(
@@ -56,16 +45,13 @@ def parse_hearing_table(table) -> List[Dict[str, str]]:
                     "decision_type": normalize_whitespace(cells[3].get_text()),
                 }
             )
-
     return hearings
 
 
 def parse_pesi_tarekh_table(table) -> List[Dict[str, str]]:
     """Parse pesi tarekh table (पेशी तारेख)."""
     pesi_dates = []
-    rows = table.find_all("tr")[1:]  # Skip header row
-
-    for row in rows:
+    for row in table.find_all("tr")[1:]:
         cells = row.find_all("td")
         if len(cells) >= 2:
             pesi_dates.append(
@@ -76,16 +62,13 @@ def parse_pesi_tarekh_table(table) -> List[Dict[str, str]]:
                     "pesi_type": normalize_whitespace(cells[1].get_text()),
                 }
             )
-
     return pesi_dates
 
 
 def parse_sadharan_tarekh_table(table) -> List[Dict[str, str]]:
     """Parse sadharan tarekh table (साधारण तारेख)."""
     sadharan_dates = []
-    rows = table.find_all("tr")[1:]  # Skip header row
-
-    for row in rows:
+    for row in table.find_all("tr")[1:]:
         cells = row.find_all("td")
         if len(cells) >= 2:
             sadharan_dates.append(
@@ -96,16 +79,13 @@ def parse_sadharan_tarekh_table(table) -> List[Dict[str, str]]:
                     "tarekh_type": normalize_whitespace(cells[1].get_text()),
                 }
             )
-
     return sadharan_dates
 
 
 def parse_related_cases_table(table) -> List[Dict[str, str]]:
     """Parse related cases table (लगाब मुद्दाहरुको विवरण)."""
     related_cases = []
-    rows = table.find_all("tr")[1:]  # Skip header row
-
-    for row in rows:
+    for row in table.find_all("tr")[1:]:
         cells = row.find_all("td")
         if len(cells) >= 6:
             related_cases.append(
@@ -120,105 +100,40 @@ def parse_related_cases_table(table) -> List[Dict[str, str]]:
                     "current_status": normalize_whitespace(cells[5].get_text()),
                 }
             )
-
     return related_cases
 
 
-class SpecialCaseEnrichmentSpider(scrapy.Spider):
+class SpecialCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
     name = "special_case_enrichment"
     base_url = (
         "https://supremecourt.gov.np/special/syspublic.php?d=reports&f=case_details"
     )
 
-    custom_settings = {
-        "RETRY_ENABLED": True,
-        "RETRY_TIMES": 3,
-        "RETRY_HTTP_CODES": [500, 502, 503, 504, 408, 429],
-        "CONCURRENT_REQUESTS": 4,  # Be gentle with enrichment requests
-        # "DOWNLOAD_DELAY": 2,  # 2 second delay between requests
-    }
+    def court_filter(self):
+        return CourtCase.court_identifier == COURT_ID
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    async def start(self):
-        """Generate requests for cases that need enrichment"""
-        self.engine = get_engine()
-        init_db(self.engine)
-        self.session = get_session(self.engine)
-
-        # Query all special court cases that need enrichment
-        with self.session.begin():
-            cases_to_enrich = (
-                self.session.query(CourtCase.case_number)
-                .filter(
-                    and_(
-                        CourtCase.court_identifier == COURT_ID,
-                        or_(
-                            CourtCase.status == "pending",
-                            CourtCase.status.is_(None),
-                        ),
-                    )
-                )
-                .order_by(CourtCase.registration_date_ad.desc().nullslast())
-                .all()
-            )
-
-        if not cases_to_enrich:
-            self.logger.info("No special court cases to enrich")
-            return
-
-        self.logger.info(f"Found {len(cases_to_enrich)} special court cases to enrich")
-
-        # Generate requests for each case
-        for (case_number,) in cases_to_enrich:
-            yield FormRequest(
-                url=self.base_url,
-                method="POST",
-                formdata={
-                    "syy": "",
-                    "smm": "",
-                    "sdd": "",
-                    "mode": "show",
-                    "regno": case_number,
-                    "submit": " Search ",
-                },
-                callback=self.parse_case_detail,
-                meta={
-                    "case_number": case_number,
-                },
-                dont_filter=True,
-                errback=self.handle_error,
-            )
-
-    def handle_error(self, failure):
-        """Handle request errors"""
-        request = failure.request
-        case_number = request.meta.get("case_number")
-
-        self.logger.error(f"Error enriching case {case_number}: {failure.value}")
-
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter(
-                    and_(
-                        CourtCase.case_number == case_number,
-                        CourtCase.court_identifier == COURT_ID,
-                    )
-                )
-                .first()
-            )
-            if case:
-                case.status = "failed"
-                case.updated_at = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
+    def build_request(self, case_number, court_identifier):
+        return FormRequest(
+            url=self.base_url,
+            method="POST",
+            formdata={
+                "syy": "",
+                "smm": "",
+                "sdd": "",
+                "mode": "show",
+                "regno": case_number,
+                "submit": " Search ",
+            },
+            callback=self.parse_case_detail,
+            meta={"case_number": case_number, "court_identifier": COURT_ID},
+            dont_filter=True,
+            errback=self.handle_error,
+        )
 
     def parse_case_detail(self, response):
-        """Parse the case detail page and update database"""
         soup = BeautifulSoup(response.text, "html.parser")
         case_number = response.meta["case_number"]
 
-        # Check if case was found - look for the main data table
         main_table = soup.find(
             "table",
             {"width": "100%", "border": "0", "cellspacing": "0", "cellpadding": "1"},
@@ -229,41 +144,28 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
             )
             return
 
-        # Check if already enriched (by parallel worker)
-        with self.session.begin():
-            case = (
-                self.session.query(CourtCase)
-                .filter(
-                    and_(
-                        CourtCase.case_number == case_number,
-                        CourtCase.court_identifier == COURT_ID,
-                    )
-                )
-                .first()
-            )
-
-            if not case:
-                self.logger.warning(f"Case {case_number} not found in database")
-                return
-
-            if case.status == "enriched":
-                self.logger.info(f"Case {case_number} already enriched, skipping")
-                return
-
-        # Extract enrichment data
         enrichment_data, entities, hearings_timeline = self._extract_case_data(soup)
 
-        # Update database
-        self._save_enrichment(case_number, enrichment_data, entities, hearings_timeline)
+        extra = {
+            "enrichment_hearings": hearings_timeline.get("hearings", []),
+            "enrichment_pesi_tarekh": hearings_timeline.get("pesi_tarekh", []),
+            "enrichment_sadharan_tarekh": hearings_timeline.get("sadharan_tarekh", []),
+            "enrichment_related_cases": hearings_timeline.get("related_cases", []),
+        }
+        if "plaintiff_advocates" in hearings_timeline:
+            extra["plaintiff_advocates"] = hearings_timeline["plaintiff_advocates"]
+        if "defendant_advocates" in hearings_timeline:
+            extra["defendant_advocates"] = hearings_timeline["defendant_advocates"]
 
+        self.save_enrichment(case_number, COURT_ID, enrichment_data, extra, entities)
         self.logger.info(
             f"Enriched case {case_number}: "
-            f"{len(entities['plaintiffs'])} plaintiffs, {len(entities['defendants'])} defendants"
+            f"{len(entities['plaintiffs'])} plaintiffs, "
+            f"{len(entities['defendants'])} defendants"
         )
 
-    def _extract_case_data(self, soup: BeautifulSoup) -> tuple:
-        """Extract all case data from the detail page"""
-        # Initialize result dictionaries
+    def _extract_case_data(self, soup: BeautifulSoup):
+        """Extract all case data from the detail page."""
         enrichment_data = {}
         entities = {"plaintiffs": [], "defendants": []}
         hearings_timeline = {
@@ -273,7 +175,6 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
             "related_cases": [],
         }
 
-        # Find the main table
         main_table = soup.find(
             "table",
             {"width": "100%", "border": "0", "cellspacing": "0", "cellpadding": "1"},
@@ -281,221 +182,88 @@ class SpecialCaseEnrichmentSpider(scrapy.Spider):
         if not main_table:
             return enrichment_data, entities, hearings_timeline
 
-        # Extract basic case information
-        rows = main_table.find_all("tr")
-
-        for row in rows:
+        for row in main_table.find_all("tr"):
             cells = row.find_all("td")
-
-            # Process all cells in the row
             for i, cell in enumerate(cells):
-                # Check if this is a caption (label) cell
-                if "caption" in cell.get("class", []):
-                    label = normalize_whitespace(cell.get_text()).rstrip(":").strip()
+                if "caption" not in cell.get("class", []):
+                    continue
+                label = normalize_whitespace(cell.get_text()).rstrip(":").strip()
+                if i + 1 >= len(cells) or "caption" in cells[i + 1].get("class", []):
+                    continue
+                value = normalize_whitespace(cells[i + 1].get_text())
 
-                    # Get the value from the next cell
-                    if i + 1 < len(cells) and "caption" not in cells[i + 1].get(
-                        "class", []
-                    ):
-                        value = normalize_whitespace(cells[i + 1].get_text())
-
-                        # Map labels to CourtCase model fields
-                        if label == "दर्ता नँ .":
-                            enrichment_data["registration_number"] = (
-                                value[:100] if value else None
-                            )
-                        elif label == "दर्ता मिती":
-                            enrichment_data["registration_date_bs"] = normalize_date(
-                                value
-                            )
-                            if value:
-                                enrichment_data["registration_date_ad"] = (
-                                    convert_bs_to_ad(normalize_date(value))
-                                )
-                        elif label == "मुद्दाको किसिम":
-                            enrichment_data["category"] = value[:100] if value else None
-                        elif label == "मुद्दा":
-                            enrichment_data["case_type"] = (
-                                value[:200] if value else None
-                            )
-                        elif label == "फाँट":
-                            enrichment_data["division"] = value[:100] if value else None
-                        elif label == "मुद्दाको स्थिती":
-                            enrichment_data["case_status"] = (
-                                value[:100] if value else None
-                            )
-                        elif label == "वादीहरु":
-                            if value:
-                                for name in value.split(","):
-                                    name = name.strip()
-                                    if name:
-                                        entities["plaintiffs"].append(
-                                            {"name": name[:500], "address": None}
-                                        )
-                        elif label == "प्रतिवादीहरु":
-                            if value:
-                                for name in value.split(","):
-                                    name = name.strip()
-                                    if name:
-                                        entities["defendants"].append(
-                                            {"name": name[:500], "address": None}
-                                        )
-                        elif "वादी अधिवक्ता" in label:
-                            if value:
-                                hearings_timeline["plaintiff_advocates"] = value
-                        elif "प्रतिवादी अधिवक्ता" in label:
-                            if value:
-                                hearings_timeline["defendant_advocates"] = value
-
-        # Extract pesi tarekh (पेशी तारेख)
-        pesi_heading = soup.find(string=lambda x: x and "पेशी तारेख" in x)
-        if pesi_heading:
-            parent_row = pesi_heading.find_parent("tr")
-            if parent_row:
-                next_row = parent_row.find_next_sibling("tr")
-                if next_row:
-                    pesi_table = next_row.find("table", class_="utivtbl")
-                    if pesi_table:
-                        hearings_timeline["pesi_tarekh"] = parse_pesi_tarekh_table(
-                            pesi_table
+                if label == "दर्ता नँ .":
+                    enrichment_data["registration_number"] = value[:100] or None
+                elif label == "दर्ता मिती":
+                    enrichment_data["registration_date_bs"] = normalize_date(value)
+                    if value:
+                        enrichment_data["registration_date_ad"] = convert_bs_to_ad(
+                            normalize_date(value)
                         )
+                elif label == "मुद्दाको किसिम":
+                    enrichment_data["category"] = value[:100] or None
+                elif label == "मुद्दा":
+                    enrichment_data["case_type"] = value[:200] or None
+                elif label == "फाँट":
+                    enrichment_data["division"] = value[:100] or None
+                elif label == "मुद्दाको स्थिती":
+                    enrichment_data["case_status"] = value[:100] or None
+                elif label == "वादीहरु":
+                    for name in value.split(","):
+                        name = name.strip()
+                        if name:
+                            entities["plaintiffs"].append(
+                                {"name": name[:500], "address": None}
+                            )
+                elif label == "प्रतिवादीहरु":
+                    for name in value.split(","):
+                        name = name.strip()
+                        if name:
+                            entities["defendants"].append(
+                                {"name": name[:500], "address": None}
+                            )
+                elif "वादी अधिवक्ता" in label:
+                    if value:
+                        hearings_timeline["plaintiff_advocates"] = value
+                elif "प्रतिवादी अधिवक्ता" in label:
+                    if value:
+                        hearings_timeline["defendant_advocates"] = value
 
-        # Extract sadharan tarekh (साधारण तारेख)
-        sadharan_heading = soup.find(string=lambda x: x and "साधारण तारेख" in x)
-        if sadharan_heading:
-            parent_row = sadharan_heading.find_parent("tr")
-            if parent_row:
-                next_row = parent_row.find_next_sibling("tr")
-                if next_row:
-                    sadharan_table = next_row.find("table", class_="utivtbl")
-                    if sadharan_table:
-                        hearings_timeline["sadharan_tarekh"] = (
-                            parse_sadharan_tarekh_table(sadharan_table)
-                        )
-
-        # Extract related cases (लगाब मुद्दाहरुको विवरण)
-        related_heading = soup.find(string=lambda x: x and "लगाब मुद्दाहरुको विवरण" in x)
-        if related_heading:
-            parent_row = related_heading.find_parent("tr")
-            if parent_row:
-                next_row = parent_row.find_next_sibling("tr")
-                if next_row:
-                    related_table = next_row.find("table", class_="utivtbl")
-                    if related_table:
-                        hearings_timeline["related_cases"] = parse_related_cases_table(
-                            related_table
-                        )
-
-        # Extract hearings (पेशी को विवरण)
-        hearing_heading = soup.find(string=lambda x: x and "पेशी को विवरण" in x)
-        if hearing_heading:
-            parent_row = hearing_heading.find_parent("tr")
-            if parent_row:
-                next_row = parent_row.find_next_sibling("tr")
-                if next_row:
-                    hearing_table = next_row.find("table", class_="utivtbl")
-                    if hearing_table:
-                        hearings_timeline["hearings"] = parse_hearing_table(
-                            hearing_table
-                        )
+        self._extract_section(
+            soup, "पेशी तारेख", "pesi_tarekh", parse_pesi_tarekh_table, hearings_timeline
+        )
+        self._extract_section(
+            soup,
+            "साधारण तारेख",
+            "sadharan_tarekh",
+            parse_sadharan_tarekh_table,
+            hearings_timeline,
+        )
+        self._extract_section(
+            soup,
+            "लगाब मुद्दाहरुको विवरण",
+            "related_cases",
+            parse_related_cases_table,
+            hearings_timeline,
+        )
+        self._extract_section(
+            soup, "पेशी को विवरण", "hearings", parse_hearing_table, hearings_timeline
+        )
 
         return enrichment_data, entities, hearings_timeline
 
-    def _save_enrichment(
-        self,
-        case_number: str,
-        enrichment_data: Dict,
-        entities: Dict[str, List[Dict]],
-        hearings_timeline: Dict[str, List[Dict]],
-    ):
-        """Save enrichment data and entities to database"""
-        now = datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
-
-        with self.session.begin():
-            # Update case with enrichment data
-            case = (
-                self.session.query(CourtCase)
-                .filter(
-                    and_(
-                        CourtCase.case_number == case_number,
-                        CourtCase.court_identifier == COURT_ID,
-                    )
-                )
-                .first()
-            )
-
-            if not case:
-                self.logger.error(f"Case {case_number} not found for enrichment")
-                return
-
-            # Update fields
-            for key, value in enrichment_data.items():
-                setattr(case, key, value)
-
-            # Store hearings and timeline in extra_data
-            if case.extra_data is None:
-                case.extra_data = {}
-
-            case.extra_data["enrichment_hearings"] = hearings_timeline.get(
-                "hearings", []
-            )
-            case.extra_data["enrichment_pesi_tarekh"] = hearings_timeline.get(
-                "pesi_tarekh", []
-            )
-            case.extra_data["enrichment_sadharan_tarekh"] = hearings_timeline.get(
-                "sadharan_tarekh", []
-            )
-            case.extra_data["enrichment_related_cases"] = hearings_timeline.get(
-                "related_cases", []
-            )
-
-            # Store advocate information if available
-            if "plaintiff_advocates" in hearings_timeline:
-                case.extra_data["plaintiff_advocates"] = hearings_timeline[
-                    "plaintiff_advocates"
-                ]
-            if "defendant_advocates" in hearings_timeline:
-                case.extra_data["defendant_advocates"] = hearings_timeline[
-                    "defendant_advocates"
-                ]
-
-            # Mark extra_data as modified
-            flag_modified(case, "extra_data")
-
-            case.status = "enriched"
-            case.enriched_at = now
-            case.updated_at = now
-
-            # Delete existing entities for this case
-            self.session.query(CaseEntity).filter(
-                and_(
-                    CaseEntity.case_number == case_number,
-                    CaseEntity.court_identifier == COURT_ID,
-                )
-            ).delete()
-
-            # Add plaintiff entities
-            for plaintiff in entities["plaintiffs"]:
-                entity = CaseEntity(
-                    case_number=case_number,
-                    court_identifier=COURT_ID,
-                    side="plaintiff",
-                    name=plaintiff["name"],
-                    address=plaintiff.get("address"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.session.add(entity)
-
-            # Add defendant entities
-            for defendant in entities["defendants"]:
-                entity = CaseEntity(
-                    case_number=case_number,
-                    court_identifier=COURT_ID,
-                    side="defendant",
-                    name=defendant["name"],
-                    address=defendant.get("address"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                self.session.add(entity)
+    @staticmethod
+    def _extract_section(soup, heading_text, key, parser, hearings_timeline):
+        """Find a `utivtbl` table that follows a heading and parse it into `key`."""
+        heading = soup.find(string=lambda x: x and heading_text in x)
+        if not heading:
+            return
+        parent_row = heading.find_parent("tr")
+        if not parent_row:
+            return
+        next_row = parent_row.find_next_sibling("tr")
+        if not next_row:
+            return
+        table = next_row.find("table", class_="utivtbl")
+        if table:
+            hearings_timeline[key] = parser(table)
