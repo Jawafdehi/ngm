@@ -12,10 +12,11 @@ Covers:
 """
 
 import json
+import re
 
 import pytest
 
-from ngm.index.build_index import IndexBuilder, _slugify
+from ngm.index.build_index import IndexBuilder, _slugify, _slug_with_hash
 from ngm.index.models import Manuscript, SourceLinkRole, SourceType
 
 
@@ -175,6 +176,15 @@ class TestLinkHelpers:
         assert _slugify("कानून") == "कानून"
         assert _slugify("") == "doc"
 
+    def test_slug_with_hash_is_collision_free(self):
+        # Distinct inputs that slugify identically must get distinct ids.
+        assert _slugify("Report (2080)") == _slugify("Report 2080") == "report-2080"
+        a = _slug_with_hash("Report (2080)")
+        b = _slug_with_hash("Report 2080")
+        assert a != b
+        assert a.startswith("report-2080-")
+        assert _slug_with_hash("Report 2080") == b  # deterministic
+
 
 # --- per-dataset builders ----------------------------------------------------
 
@@ -184,7 +194,8 @@ class TestBuildersProduceLogicalDocuments:
         node = make_builder(store)._build_kanun_patrika_node()
         assert len(node.manuscripts) == 1
         ms = node.manuscripts[0]
-        assert ms.document_id == "ngm:kanun-patrika:2080-bhadra"
+        assert ms.document_id.startswith("ngm:kanun-patrika:2080-bhadra-")
+        assert re.fullmatch(r"[0-9a-f]{8}", ms.document_id.rsplit("-", 1)[-1])
         assert ms.source_type == SourceType.MISC.value
         assert ms.links == [
             {"link": ms.url, "role": "RAW"},
@@ -194,7 +205,7 @@ class TestBuildersProduceLogicalDocuments:
     def test_annual_report(self, store):
         node = make_builder(store)._build_ciaa_annual_reports_node()
         ms = node.manuscripts[0]
-        assert ms.document_id == "ngm:ciaa-annual-report:report-2080"
+        assert ms.document_id.startswith("ngm:ciaa-annual-report:report-2080-")
         assert ms.links[0]["role"] == "RAW"
         assert_links_documentsource_compatible(ms.links)
 
@@ -213,6 +224,26 @@ class TestBuildersProduceLogicalDocuments:
         raw = next(link for link in ms.links if link["role"] == "RAW")
         assert raw["link"].endswith("charge.pdf")
         assert_links_documentsource_compatible(ms.links)
+
+    def test_press_release_press_id_falls_back_to_filename(self, tmp_path):
+        # Metadata files are named {press_id}.json; if the body omits press_id,
+        # the id must fall back to the stem (never "...:None").
+        builder = make_builder(tmp_path)
+        files_dir = tmp_path / "files"
+        files_dir.mkdir()
+        meta_path = tmp_path / "5678.json"
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "title": "x",
+                    "file_names": ["a.pdf"],
+                    "source_url": "https://ciaa.gov.np/p/5678",
+                }
+            ),
+            encoding="utf-8",
+        )
+        ms = builder._process_press_release_metadata(meta_path, files_dir)
+        assert ms.document_id == "ngm:ciaa-press-release:5678"
 
     def test_ppmo_blacklist_source_page_only(self, store):
         node = make_builder(store)._build_ppmo_blacklist_node()

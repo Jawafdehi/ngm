@@ -19,6 +19,7 @@ from ngm.database.models import (
     get_session,
     init_db,
 )
+from ngm.index.models import document_html_relpath
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,6 @@ _UPDATE_COLS = (
     "index_path",
     "last_seen_build",
 )
-
-
-def _html_relpath(document_id: str) -> str:
-    """Store-relative HTML landing-page key for a document_id (see build_index)."""
-    segments = [s for s in document_id.split(":") if s]
-    return "d/" + "/".join(segments) + ".html"
 
 
 def collect_rows(root, base_url: str, build_id: str) -> list[dict]:
@@ -69,7 +64,7 @@ def collect_rows(root, base_url: str, build_id: str) -> list[dict]:
                         meta.get("publication_date") or meta.get("date")
                     ),
                     "primary_url": ms.url or None,
-                    "html_url": f"{base}/{_html_relpath(ms.document_id)}",
+                    "html_url": f"{base}/{document_html_relpath(ms.document_id)}",
                     "links": ms.links,
                     "doc_metadata": meta,
                     "index_path": node.path,
@@ -97,9 +92,13 @@ def sync_document_sources(root, base_url: str, build_id: str, engine=None) -> di
     init_db(engine)  # create the table on first run (create_all is idempotent)
     session = get_session(engine)
     try:
-        with session.begin():
-            for i in range(0, len(rows), _UPSERT_BATCH):
-                batch = rows[i : i + _UPSERT_BATCH]
+        # Commit each batch in its own transaction so a 1M-row sync never runs as
+        # one giant transaction (bounded locks/WAL/bloat). All current rows are
+        # stamped with build_id first; the stale sweep then runs afterwards, so
+        # it can only delete rows this build genuinely did not touch.
+        for i in range(0, len(rows), _UPSERT_BATCH):
+            batch = rows[i : i + _UPSERT_BATCH]
+            with session.begin():
                 stmt = pg_insert(DocumentSourceIndex).values(batch)
                 set_clause = {c: getattr(stmt.excluded, c) for c in _UPDATE_COLS}
                 set_clause["updated_at"] = func.now()
@@ -108,6 +107,7 @@ def sync_document_sources(root, base_url: str, build_id: str, engine=None) -> di
                 )
                 session.execute(stmt)
 
+        with session.begin():
             deleted = session.execute(
                 delete(DocumentSourceIndex).where(
                     DocumentSourceIndex.last_seen_build != build_id

@@ -40,7 +40,8 @@ def test_writes_go_to_output_root_not_read_root(tmp_path):
     assert (staging / "indices" / "2026-06-26" / "index.json").exists()
     assert (staging / "sitemap.xml").exists()
     assert (staging / "robots.txt").exists()
-    assert (staging / "d" / "ngm" / "kanun-patrika" / "2080-bhadra.html").exists()
+    # document_id carries a hash suffix → match by prefix.
+    assert list((staging / "d" / "ngm" / "kanun-patrika").glob("2080-bhadra-*.html"))
 
     # Read store still only has uploads — no derived files leaked into it.
     assert (read_root / "uploads").exists()

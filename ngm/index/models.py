@@ -50,6 +50,18 @@ class SourceType(StrEnum):
     MISC = "MISC"
 
 
+def document_html_relpath(document_id: str) -> str:
+    """Store-relative HTML landing-page key for a document_id.
+
+    Colon-separated id segments become path segments, so the encoding is
+    lossless and collision-free, e.g.
+    ``ngm:ciaa-press-release:1234`` -> ``d/ngm/ciaa-press-release/1234.html``.
+    Single source of truth shared by the index builder and the DB indexer.
+    """
+    segments = [s for s in document_id.split(":") if s]
+    return "d/" + "/".join(segments) + ".html"
+
+
 @dataclass
 class Manuscript:
     """Represents a single logical document/manuscript in the index.

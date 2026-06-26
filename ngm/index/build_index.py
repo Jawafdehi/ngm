@@ -9,6 +9,7 @@ This module implements the new tree-based index system where:
 """
 
 import concurrent.futures
+import hashlib
 import html
 import json
 import logging
@@ -23,7 +24,13 @@ from typing import Any
 from cloudpathlib import AnyPath
 from sqlalchemy.exc import SQLAlchemyError
 
-from .models import Manuscript, IndexNode, SourceLinkRole, SourceType
+from .models import (
+    Manuscript,
+    IndexNode,
+    SourceLinkRole,
+    SourceType,
+    document_html_relpath,
+)
 from ..database.models import get_engine, get_session, CourtCase
 
 logger = logging.getLogger(__name__)
@@ -50,6 +57,18 @@ def _slugify(text: str) -> str:
     text = re.sub(r"[^0-9a-zऀ-ॿ._-]", "", text)
     text = re.sub(r"-{2,}", "-", text).strip("-")
     return text or "doc"
+
+
+def _slug_with_hash(text: str) -> str:
+    """A readable slug with a short deterministic hash suffix.
+
+    Used for document ids derived from filenames (kanun-patrika, annual reports,
+    PPMO). The hash makes the id collision-free even when two distinct filenames
+    slugify to the same value (e.g. ``Report (2080)`` and ``Report 2080``), while
+    keeping the slug for human readability.
+    """
+    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=4).hexdigest()
+    return f"{_slugify(text)}-{digest}"
 
 
 class IndexBuilder:
@@ -247,12 +266,10 @@ class IndexBuilder:
     def _document_html_relpath(document_id: str) -> str:
         """Map a document_id to its static HTML landing-page key under /d/.
 
-        Colon-separated id segments become path segments, so the encoding is
-        lossless and collision-free, e.g.
-        ``ngm:ciaa-press-release:1234`` -> ``d/ngm/ciaa-press-release/1234.html``.
+        Thin wrapper over ``models.document_html_relpath`` (the single source of
+        truth, also used by the DB indexer).
         """
-        segments = [s for s in document_id.split(":") if s]
-        return "d/" + "/".join(segments) + ".html"
+        return document_html_relpath(document_id)
 
     def _document_url(self, document_id: str) -> str:
         """Full public URL of a document's HTML landing page."""
@@ -330,7 +347,7 @@ class IndexBuilder:
                     file_name=pdf_path.name,
                     metadata={},
                     links=links,
-                    document_id=f"ngm:kanun-patrika:{_slugify(pdf_path.stem)}",
+                    document_id=f"ngm:kanun-patrika:{_slug_with_hash(pdf_path.stem)}",
                     source_type=SourceType.MISC.value,
                 )
             )
@@ -383,7 +400,7 @@ class IndexBuilder:
             file_name=pdf_path.name,
             metadata=raw,
             links=links,
-            document_id=f"ngm:ciaa-annual-report:{_slugify(file_id)}",
+            document_id=f"ngm:ciaa-annual-report:{_slug_with_hash(file_id)}",
             source_type=SourceType.MISC.value,
         )
 
@@ -505,7 +522,12 @@ class IndexBuilder:
             # No attachments and no source page — nothing addressable to index.
             return None
 
+        # press_id is the stable key; fall back to the metadata filename stem
+        # (files are named "{press_id}.json") so the document_id is never
+        # "...:None" when the field is absent from the metadata body.
         press_id = metadata.get("press_id")
+        if press_id is None:
+            press_id = metadata_path.stem
         primary_name = file_names[0] if file_names else metadata_path.stem
         return Manuscript(
             url=self._primary_url(links),
@@ -605,7 +627,7 @@ class IndexBuilder:
             file_name=metadata_path.name,
             metadata=metadata,
             links=links,
-            document_id=f"ngm:ppmo-blacklist:{_slugify(metadata_path.stem)}",
+            document_id=f"ngm:ppmo-blacklist:{_slug_with_hash(metadata_path.stem)}",
             source_type=SourceType.MISC.value,
         )
 
