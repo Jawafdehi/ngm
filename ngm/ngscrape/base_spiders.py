@@ -218,12 +218,19 @@ class BaseCourtCasesSpider(BaseScrapeSpider):
         return data
 
     def save_cases(self, data, court_key, date_bs, note=None):
-        """Persist cases + hearings for a date and mark the date scraped."""
-        with self.session.begin():
-            for case, hearing in data:
-                self.session.merge(case)
-                self.session.add(hearing)
-            mark_date_scraped(self.session, court_key, date_bs, note)
+        """Persist cases + hearings for a date and mark the date scraped.
+
+        Closes the session afterwards so the identity map can't grow unbounded
+        across a long crawl (the same session is reused for every date).
+        """
+        try:
+            with self.session.begin():
+                for case, hearing in data:
+                    self.session.merge(case)
+                    self.session.add(hearing)
+                mark_date_scraped(self.session, court_key, date_bs, note)
+        finally:
+            self.session.close()
 
     # --- per-bench accumulation (high / special) -------------------------
 
@@ -262,8 +269,10 @@ class BaseCaseEnrichmentSpider(BaseScrapeSpider):
 
     Owns the pending-case query, the request loop, failure marking, and the
     unified save: one locked transaction per case (no separate pre-check query,
-    no TOCTOU window) that updates core fields + ``extra_data`` and rebuilds
-    ``CaseEntity`` rows while preserving any resolved ``nes_id``.
+    no TOCTOU window) that updates core fields + ``extra_data`` and rebuilds its
+    ``CaseEntity`` rows (duplicate/junk parties dropped). Re-enrichment fully
+    replaces a case's parties, so any externally-resolved ``nes_id`` is not
+    carried over.
 
     Subclasses implement: :meth:`court_filter`, :meth:`build_request`, and the
     court-specific ``parse_case_detail`` that calls :meth:`save_enrichment`.
@@ -351,30 +360,35 @@ class BaseCaseEnrichmentSpider(BaseScrapeSpider):
         missing from the DB.
         """
         now = self._now_ktm()
-        with self.session.begin():
-            case = self._get_case(case_number, court_identifier, lock=True)
-            if not case:
-                self.logger.error(f"Case {case_number} not found for enrichment")
-                return False
+        try:
+            with self.session.begin():
+                case = self._get_case(case_number, court_identifier, lock=True)
+                if not case:
+                    self.logger.error(f"Case {case_number} not found for enrichment")
+                    return False
 
-            if case.status == "enriched":
-                self.logger.info(f"Case {case_number} already enriched, skipping")
+                if case.status == "enriched":
+                    self.logger.info(f"Case {case_number} already enriched, skipping")
+                    return True
+
+                for key, value in core_fields.items():
+                    setattr(case, key, value)
+
+                if case.extra_data is None:
+                    case.extra_data = {}
+                case.extra_data.update(extra_updates)
+                flag_modified(case, "extra_data")
+
+                case.status = "enriched"
+                case.enriched_at = now
+                case.updated_at = now
+
+                self._replace_entities(case_number, court_identifier, entities, now)
                 return True
-
-            for key, value in core_fields.items():
-                setattr(case, key, value)
-
-            if case.extra_data is None:
-                case.extra_data = {}
-            case.extra_data.update(extra_updates)
-            flag_modified(case, "extra_data")
-
-            case.status = "enriched"
-            case.enriched_at = now
-            case.updated_at = now
-
-            self._replace_entities(case_number, court_identifier, entities, now)
-            return True
+        finally:
+            # Release the session (and its identity map) after each case so memory
+            # stays flat across a long enrichment run.
+            self.session.close()
 
     def _replace_entities(self, case_number, court_identifier, entities, now):
         """Rebuild this case's plaintiff/defendant rows (scoped delete + reinsert).

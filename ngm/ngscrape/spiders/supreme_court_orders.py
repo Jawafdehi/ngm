@@ -353,6 +353,8 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                     "Resetting DB connection and retrying."
                 )
                 try:
+                    if getattr(self, "session", None):
+                        self.session.close()
                     self.engine.dispose()
                     self.session = get_session(self.engine)
                 except Exception:

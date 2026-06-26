@@ -569,6 +569,8 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
         except Exception:
             spider.logger.exception(f"[{case_number}] Error marking transient")
             raise
+        finally:
+            self.session.close()
 
     def _mark_failed(self, spider, case_number, court_identifier, error):
         """

@@ -258,14 +258,15 @@ class SupremeCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
             "a", href=lambda x: x and "mode=view" in x and "caseno=" in x
         )
         if not detail_link:
+            # Leave the case pending (don't permanently fail) — a missing detail
+            # link is often transient, and it is retried on the next run. Matches
+            # the original behavior.
             self.logger.warning(f"Case {case_number} not found / no detail link")
-            self.mark_failed(case_number, COURT_ID)
             return
 
         caseno = extract_caseno(detail_link.get("href"))
         if not caseno:
             self.logger.error(f"Could not extract caseno for {case_number}")
-            self.mark_failed(case_number, COURT_ID)
             return
 
         detail_url = (

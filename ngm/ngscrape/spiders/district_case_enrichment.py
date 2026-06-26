@@ -149,19 +149,22 @@ class DistrictCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
         if self.backfill_case_type:
             # If a parallel worker already enriched this row, only backfill the
             # missing case_type (don't rebuild entities/hearings).
-            with self.session.begin():
-                case = self._get_case(case_number, code_name, lock=True)
-                if case and case.status == "enriched":
-                    if case.case_type:
+            try:
+                with self.session.begin():
+                    case = self._get_case(case_number, code_name, lock=True)
+                    if case and case.status == "enriched":
+                        if case.case_type:
+                            return
+                        case_type = enrichment_data.get("case_type")
+                        if case_type:
+                            case.case_type = case_type[:200]
+                            case.updated_at = self._now_ktm()
+                            self.logger.info(
+                                f"Backfilled case_type for {case_number} ({code_name})"
+                            )
                         return
-                    case_type = enrichment_data.get("case_type")
-                    if case_type:
-                        case.case_type = case_type[:200]
-                        case.updated_at = self._now_ktm()
-                        self.logger.info(
-                            f"Backfilled case_type for {case_number} ({code_name})"
-                        )
-                    return
+            finally:
+                self.session.close()
 
         entities = self._extract_entities(soup)
         hearings_timeline = self._extract_hearings_timeline(soup)
