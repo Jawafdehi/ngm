@@ -220,9 +220,11 @@ class TestBuildersProduceLogicalDocuments:
         assert roles.count("RAW") == 1
         assert roles.count("ALTERNATE") == 1
         assert "SOURCE_PAGE" in roles
-        # PDF wins RAW over the .doc attachment.
+        # PDF wins RAW over the .doc attachment, and url/file_name follow it.
         raw = next(link for link in ms.links if link["role"] == "RAW")
         assert raw["link"].endswith("charge.pdf")
+        assert ms.url.endswith("charge.pdf")
+        assert ms.file_name == "charge.pdf"
         assert_links_documentsource_compatible(ms.links)
 
     def test_press_release_press_id_falls_back_to_filename(self, tmp_path):

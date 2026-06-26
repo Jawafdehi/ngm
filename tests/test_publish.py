@@ -104,6 +104,7 @@ class _FakeS3:
     def __init__(self, existing):
         self.store = dict(existing)
         self.content_types = {}
+        self.delete_errors = []  # inject per-object delete failures
 
     def upload_file(self, filename, bucket, key, ExtraArgs=None):  # noqa: N803
         with open(filename, "rb") as fh:
@@ -115,8 +116,11 @@ class _FakeS3:
         return _FakePaginator(self.store)
 
     def delete_objects(self, Bucket, Delete):  # noqa: N803
+        deleted = []
         for obj in Delete["Objects"]:
             self.store.pop(obj["Key"], None)
+            deleted.append({"Key": obj["Key"]})
+        return {"Deleted": deleted, "Errors": list(self.delete_errors)}
 
 
 def test_publish_uploads_and_prunes_only_managed(tmp_path, monkeypatch):
@@ -155,3 +159,12 @@ def test_publish_uploads_and_prunes_only_managed(tmp_path, monkeypatch):
     # Protected areas untouched.
     assert fake.store["uploads/x.pdf"] == b"keep"
     assert fake.store["indices/2026-06-25/index.json"] == b"keep"
+
+
+def test_publish_raises_on_delete_errors(tmp_path, monkeypatch):
+    (tmp_path / "sitemap.xml").write_text("<x/>", encoding="utf-8")
+    fake = _FakeS3({"d/ngm/gone.html": b"orphan"})  # orphan → goes to delete
+    fake.delete_errors = [{"Key": "x", "Code": "AccessDenied", "Message": "no"}]
+    monkeypatch.setattr(publish, "_make_client", lambda endpoint_url: fake)
+    with pytest.raises(RuntimeError, match="delete_objects failed"):
+        publish.publish(str(tmp_path), "s3://ngm", "2026-06-26")

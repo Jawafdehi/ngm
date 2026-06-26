@@ -522,15 +522,25 @@ class IndexBuilder:
             # No attachments and no source page — nothing addressable to index.
             return None
 
-        # press_id is the stable key; fall back to the metadata filename stem
-        # (files are named "{press_id}.json") so the document_id is never
-        # "...:None" when the field is absent from the metadata body.
+        # press_id is the stable dedupe key (HTML path + DB PK). Fall back to the
+        # metadata filename stem (files are named "{press_id}.json") when absent
+        # OR blank, so ids never collapse onto "...:None"/"...:" and overwrite.
         press_id = metadata.get("press_id")
-        if press_id is None:
+        if press_id is None or not str(press_id).strip():
             press_id = metadata_path.stem
-        primary_name = file_names[0] if file_names else metadata_path.stem
+        else:
+            press_id = str(press_id).strip()
+
+        # Keep the back-compat url/file_name aligned: both must describe the
+        # promoted RAW attachment (PDF preferred), not necessarily file_names[0].
+        primary_url = self._primary_url(links)
+        raw_link = next(
+            (lk["link"] for lk in links if lk["role"] == SourceLinkRole.RAW.value),
+            "",
+        )
+        primary_name = raw_link.rsplit("/", 1)[-1] if raw_link else metadata_path.stem
         return Manuscript(
-            url=self._primary_url(links),
+            url=primary_url,
             file_name=primary_name,
             metadata=metadata,
             links=links,
@@ -1327,7 +1337,7 @@ class IndexBuilder:
             jsonld["datePublished"] = str(pub_date)
         raw_link = next(
             (
-                link["link"]
+                link.get("link", "")
                 for link in ms.links
                 if link.get("role") == SourceLinkRole.RAW.value
             ),

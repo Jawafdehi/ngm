@@ -14,6 +14,7 @@ or deleted — ``is_safe_to_delete`` is the defensive guard that enforces this.
 """
 
 import concurrent.futures
+import itertools
 import logging
 import os
 from pathlib import Path
@@ -129,15 +130,29 @@ def _upload(client, bucket, prefix, staging_dir: Path, keys: set[str]) -> int:
         )
 
     done = 0
+    total = len(keys)
+    key_iter = iter(keys)
     with concurrent.futures.ThreadPoolExecutor(max_workers=_UPLOAD_WORKERS) as ex:
-        futures = {ex.submit(put, k): k for k in keys}
-        for fut in concurrent.futures.as_completed(futures):
-            fut.result()  # raise on first failure
-            done += 1
-            if done % 5000 == 0:
-                logger.info("  uploaded %d/%d files", done, len(keys))
-    logger.info("Uploaded %d file(s) to s3://%s/%s", len(keys), bucket, prefix)
-    return len(keys)
+        # Bounded window: keep ~4x workers in flight rather than scheduling one
+        # Future per file up front (1M files would mean 1M queued Futures).
+        inflight = {
+            ex.submit(put, k): k
+            for k in itertools.islice(key_iter, _UPLOAD_WORKERS * 4)
+        }
+        while inflight:
+            completed, _ = concurrent.futures.wait(
+                inflight, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for fut in completed:
+                del inflight[fut]
+                fut.result()  # raise on first failure
+                done += 1
+                if done % 5000 == 0:
+                    logger.info("  uploaded %d/%d files", done, total)
+            for k in itertools.islice(key_iter, len(completed)):
+                inflight[ex.submit(put, k)] = k
+    logger.info("Uploaded %d file(s) to s3://%s/%s", total, bucket, prefix)
+    return total
 
 
 def _list_remote_keys(client, bucket, prefix, date_str) -> set[str]:
@@ -153,11 +168,23 @@ def _list_remote_keys(client, bucket, prefix, date_str) -> set[str]:
 
 def _delete(client, bucket, prefix, keys: set[str]) -> int:
     keys = sorted(keys)
+    errors: list = []
     for i in range(0, len(keys), _DELETE_BATCH):
         batch = keys[i : i + _DELETE_BATCH]
-        client.delete_objects(
+        resp = client.delete_objects(
             Bucket=bucket,
-            Delete={"Objects": [{"Key": f"{prefix}{k}"} for k in batch]},
+            Delete={
+                "Objects": [{"Key": f"{prefix}{k}"} for k in batch],
+                "Quiet": True,
+            },
+        )
+        # delete_objects returns 200 even when individual keys fail; the failures
+        # are reported per-object under "Errors". Surface them instead of
+        # silently leaving orphans behind.
+        errors.extend(resp.get("Errors", []) if resp else [])
+    if errors:
+        raise RuntimeError(
+            f"delete_objects failed for {len(errors)} object(s): {errors[:5]}"
         )
     return len(keys)
 
