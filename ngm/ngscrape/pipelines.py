@@ -10,6 +10,7 @@ import pytz
 from scrapy.pipelines.files import FilesPipeline
 from sqlalchemy.orm.attributes import flag_modified
 from ngm.database.models import CourtCase
+from ngm.utils.document_sources import order_document_sources
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
@@ -454,6 +455,14 @@ class SupremeCourtOrdersPipeline(FilesPipeline):
                 # Store file paths and timestamp
                 case.extra_data["court_orders"] = file_paths
                 case.extra_data["court_orders_scraped_at"] = self._now_iso()
+
+                # Mirror the orders as DocumentSource structs on the dedicated
+                # column (presentation surface for the API/frontend). extra_data
+                # above stays the scrape-state marker the selection query keys on.
+                case.document_sources = (
+                    order_document_sources(court_identifier, case_number, file_paths)
+                    or None
+                )
 
                 # Clear all previous state
                 case.extra_data.pop("orders_failed", None)

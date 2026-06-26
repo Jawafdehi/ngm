@@ -85,6 +85,53 @@ def test_no_docs_old_case_is_permanent(session):
     assert extra["orders_error"] == "no_docs_old_case"
 
 
+def test_success_writes_court_orders_and_document_sources(session):
+    """A successful download dual-writes: extra_data['court_orders'] (scrape state)
+    AND the structured document_sources column (presentation surface)."""
+    _seed(session, "082-CR-0300")
+    p = _pipeline(session)
+    info = SimpleNamespace(spider=_FakeSpider(session))
+    item = {
+        "case_number": "082-CR-0300",
+        "court_identifier": "special",
+        "file_urls": ["https://src/a.pdf", "https://src/b.docx"],
+    }
+    results = [
+        (True, {"path": "court-orders/special/082-CR-0300.1.pdf"}),
+        (True, {"path": "court-orders/special/082-CR-0300.2.docx"}),
+    ]
+
+    p.item_completed(results, item, info)
+
+    with session.begin():
+        case = (
+            session.query(CourtCase)
+            .filter_by(case_number="082-CR-0300", court_identifier="special")
+            .first()
+        )
+        extra = dict(case.extra_data or {})
+        ds = case.document_sources
+
+    # scrape-state marker preserved (selection query still depends on it)
+    assert extra["court_orders"] == [
+        "court-orders/special/082-CR-0300.1.pdf",
+        "court-orders/special/082-CR-0300.2.docx",
+    ]
+    assert "court_orders_scraped_at" in extra
+    assert "orders_failed" not in extra
+
+    # structured DocumentSource column — one source per case
+    assert isinstance(ds, list) and len(ds) == 1
+    src = ds[0]
+    assert src["document_id"] == "ngm:court-order:special:082-CR-0300"
+    assert src["source_type"] == "COURT_ORDER"
+    assert src["links"][0]["role"] == "RAW"  # pdf first
+    assert src["links"][0]["link"].endswith("082-CR-0300.1.pdf")
+    assert src["links"][1]["role"] == "ALTERNATE"
+    assert src["url"] == src["links"][0]["link"]
+    assert info.spider.successful_cases == 1
+
+
 def test_transient_escalates_after_max_retries(session):
     _seed(session, "082-CR-0272")
     p = _pipeline(session)

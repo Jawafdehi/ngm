@@ -195,6 +195,13 @@ class CourtCase(Base):
     # Additional data (case-specific metadata)
     extra_data = Column(JSONB, nullable=True)
 
+    # Court-order documents in the Jawafdehi API DocumentSource shape:
+    # list[{document_id, source_type, url, links:[{link, role}]}]. NULL when the
+    # case has no scraped orders. Written by SupremeCourtOrdersPipeline via
+    # ngm.utils.document_sources.order_document_sources(); extra_data["court_orders"]
+    # remains the scrape-state marker the selection query keys on.
+    document_sources = Column(JSONB, nullable=True)
+
     def __repr__(self):
         return f"<CourtCase(case_number={self.case_number}, court={self.court_identifier})>"
 
