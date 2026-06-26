@@ -168,3 +168,10 @@ def test_publish_raises_on_delete_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "_make_client", lambda endpoint_url: fake)
     with pytest.raises(RuntimeError, match="delete_objects failed"):
         publish.publish(str(tmp_path), "s3://ngm", "2026-06-26")
+
+
+def test_make_client_pool_matches_workers():
+    # The boto3 connection pool must be sized to the upload worker count so the
+    # parallel upload doesn't thrash connections (the default pool is 10).
+    client = publish._make_client(None)
+    assert client.meta.config.max_pool_connections == publish._UPLOAD_WORKERS
