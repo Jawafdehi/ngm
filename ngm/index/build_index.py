@@ -9,16 +9,28 @@ This module implements the new tree-based index system where:
 """
 
 import concurrent.futures
+import hashlib
+import html
 import json
 import logging
 import os
+import re
+import shutil
+import tempfile
+from collections import deque
 from datetime import datetime
 from typing import Any
 
 from cloudpathlib import AnyPath
 from sqlalchemy.exc import SQLAlchemyError
 
-from .models import Manuscript, IndexNode
+from .models import (
+    Manuscript,
+    IndexNode,
+    SourceLinkRole,
+    SourceType,
+    document_html_relpath,
+)
 from ..database.models import get_engine, get_session, CourtCase
 
 logger = logging.getLogger(__name__)
@@ -26,6 +38,37 @@ logger = logging.getLogger(__name__)
 # Configuration
 DEFAULT_PAGE_SIZE = 100  # Number of manuscripts per index page
 _MAX_WRITE_WORKERS = 10  # Parallel S3 PUT workers
+# A single sitemap file may list at most 50,000 URLs (sitemaps.org limit).
+SITEMAP_MAX_URLS = 50000
+# Max HTML-page writes in flight at once during the streaming SEO pass. Bounds
+# peak memory (rendered HTML held until written) regardless of dataset size, so
+# emitting 1M+ landing pages does not materialize 1M strings at once.
+_SEO_MAX_INFLIGHT = 256
+
+
+def _slugify(text: str) -> str:
+    """Make a URL/key-safe slug, preserving ASCII alphanumerics and Devanagari.
+
+    Used to derive stable document ids and HTML page paths from filenames. Keeps
+    Nepali (Devanagari, U+0900–U+097F) so ids stay human-meaningful.
+    """
+    text = (text or "").strip().lower()
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^0-9a-zऀ-ॿ._-]", "", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text or "doc"
+
+
+def _slug_with_hash(text: str) -> str:
+    """A readable slug with a short deterministic hash suffix.
+
+    Used for document ids derived from filenames (kanun-patrika, annual reports,
+    PPMO). The hash makes the id collision-free even when two distinct filenames
+    slugify to the same value (e.g. ``Report (2080)`` and ``Report 2080``), while
+    keeping the slug for human readability.
+    """
+    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=4).hexdigest()
+    return f"{_slugify(text)}-{digest}"
 
 
 class IndexBuilder:
@@ -37,6 +80,7 @@ class IndexBuilder:
         base_url: str,
         date_str: str,
         page_size: int = DEFAULT_PAGE_SIZE,
+        output_path: str | None = None,
     ):
         try:
             page_size = int(page_size)  # Convert to int
@@ -44,7 +88,12 @@ class IndexBuilder:
             raise ValueError(f"page_size must be a valid integer: {e}") from e
         if page_size <= 0:
             raise ValueError("page_size must be > 0")
+        # root_path is the READ source (scraper uploads/ + DB-derived inputs).
+        # output_root is where derived files are WRITTEN — a local staging dir
+        # in production so the build runs against fast local disk and uploads to
+        # R2 once at the end. Defaults to root_path (local/test: read==write).
         self.root_path = AnyPath(root_path)
+        self.output_root = AnyPath(output_path) if output_path else self.root_path
         self.base_url = base_url.rstrip("/")
         self.date_str = date_str
         self.indices_base_url = f"{self.base_url}/indices/{date_str}"
@@ -53,6 +102,9 @@ class IndexBuilder:
         # Database engine for fiscal year validation (lazy initialized)
         # Sessions are created per-thread to avoid threading issues
         self._engine = None
+        # Cached (bucket, base_prefix, boto3 client) when root_path is on S3,
+        # used for fast recursive listings (see _list_court_type_files).
+        self._s3_ctx = None
 
     @property
     def engine(self):
@@ -181,6 +233,51 @@ class IndexBuilder:
         """Construct the full public URL for a file."""
         return f"{self.base_url}/{self._relative_path(file_path)}"
 
+    @staticmethod
+    def _file_links(file_urls: list[str]) -> list[dict[str, str]]:
+        """Turn file URLs into a roled link list mirroring DocumentSource.url.
+
+        The primary file (PDF preferred) gets role RAW; every other file is an
+        ALTERNATE rendering. Order is otherwise preserved (stable sort).
+        """
+        ordered = sorted(
+            [u for u in file_urls if u],
+            key=lambda u: 0 if u.lower().endswith(".pdf") else 1,
+        )
+        links: list[dict[str, str]] = []
+        for i, url in enumerate(ordered):
+            role = SourceLinkRole.RAW if i == 0 else SourceLinkRole.ALTERNATE
+            links.append({"link": url, "role": role.value})
+        return links
+
+    @staticmethod
+    def _append_source_page(
+        links: list[dict[str, str]], source_url: str | None
+    ) -> None:
+        """Append a SOURCE_PAGE link (the gov page a document was published on)."""
+        if source_url and source_url.strip():
+            links.append(
+                {"link": source_url.strip(), "role": SourceLinkRole.SOURCE_PAGE.value}
+            )
+
+    @staticmethod
+    def _primary_url(links: list[dict[str, str]]) -> str:
+        """The back-compat ``url`` value: first link's target (RAW if present)."""
+        return links[0]["link"] if links else ""
+
+    @staticmethod
+    def _document_html_relpath(document_id: str) -> str:
+        """Map a document_id to its static HTML landing-page key under /d/.
+
+        Thin wrapper over ``models.document_html_relpath`` (the single source of
+        truth, also used by the DB indexer).
+        """
+        return document_html_relpath(document_id)
+
+    def _document_url(self, document_id: str) -> str:
+        """Full public URL of a document's HTML landing page."""
+        return f"{self.base_url}/{self._document_html_relpath(document_id)}"
+
     def build_tree(self) -> IndexNode:
         """Build the complete index tree, running each source builder in parallel."""
         root = IndexNode(name="root", path="/")
@@ -245,9 +342,16 @@ class IndexBuilder:
 
         manuscripts = []
         for pdf_path in sorted(pdf_dir.glob("*.pdf"), key=lambda p: p.name):
+            url = self._build_url(pdf_path)
+            links = self._file_links([url])
             manuscripts.append(
                 Manuscript(
-                    url=self._build_url(pdf_path), file_name=pdf_path.name, metadata={}
+                    url=url,
+                    file_name=pdf_path.name,
+                    metadata={},
+                    links=links,
+                    document_id=f"ngm:kanun-patrika:{_slug_with_hash(pdf_path.stem)}",
+                    source_type=SourceType.MISC.value,
                 )
             )
             logger.debug("kanun-patrika: found %s", pdf_path.name)
@@ -291,10 +395,16 @@ class IndexBuilder:
                 f" — got {type(raw).__name__}"
             )
 
+        url = self._build_url(pdf_path)
+        links = self._file_links([url])
+        self._append_source_page(links, raw.get("source_url"))
         return Manuscript(
-            url=self._build_url(pdf_path),
+            url=url,
             file_name=pdf_path.name,
             metadata=raw,
+            links=links,
+            document_id=f"ngm:ciaa-annual-report:{_slug_with_hash(file_id)}",
+            source_type=SourceType.MISC.value,
         )
 
     def _build_ciaa_annual_reports_node(self) -> IndexNode | None:
@@ -349,8 +459,14 @@ class IndexBuilder:
 
     def _process_press_release_metadata(
         self, metadata_path, files_dir
-    ) -> list[Manuscript]:
-        """Process a single press release metadata file and return manuscripts."""
+    ) -> Manuscript | None:
+        """Process a press release metadata file into ONE logical-document manuscript.
+
+        A press release may ship several attachments (PDF + DOC); they collapse
+        into a single manuscript whose ``links`` carry the primary file as RAW,
+        the rest as ALTERNATE, and the CIAA page as SOURCE_PAGE — exactly the
+        DocumentSource shape. Returns None only when there is nothing to index.
+        """
         # Metadata file itself failing → throw.
         # File-based checkpointing means only new files appear each run,
         # so a malformed new metadata file means the scraper pipeline broke.
@@ -387,8 +503,13 @@ class IndexBuilder:
                 f" file_names must be a list"
             )
 
-        # Build manuscript entry for each PDF file
-        manuscripts = []
+        # Build one roled link per attachment. PDF (if any) becomes RAW, the
+        # rest ALTERNATE; the CIAA landing page is SOURCE_PAGE.
+        #
+        # A missing file in R2 → still indexed (warn-not-throw): metadata is the
+        # source of truth and R2 upload can lag the metadata write; a 404 at
+        # download time beats blocking the whole build over one lagging file.
+        file_urls = []
         for file_name in file_names:
             # Validate file_name is a non-empty string
             if not isinstance(file_name, str) or not file_name.strip():
@@ -396,24 +517,39 @@ class IndexBuilder:
                     f"ciaa-press-releases: invalid file_name"
                     f" in {metadata_path.name}: {file_name!r}"
                 )
+            file_urls.append(self._build_url(files_dir / file_name))
 
-            # PDF not existing in R2 → warn only, do not throw.
-            # Metadata is the source of truth for press releases.
-            # The scraper writes metadata after the file download completes,
-            # but R2 upload and propagation are not atomic — the PDF may lag
-            # behind the metadata write. The URL is still valid to index;
-            # the user gets a 404 at download time, which is preferable
-            # to blocking the entire index build over one lagging file.
-            pdf_path = files_dir / file_name
-            manuscripts.append(
-                Manuscript(
-                    url=self._build_url(pdf_path),
-                    file_name=file_name,
-                    metadata=metadata,
-                )
-            )
+        links = self._file_links(file_urls)
+        self._append_source_page(links, metadata.get("source_url"))
+        if not links:
+            # No attachments and no source page — nothing addressable to index.
+            return None
 
-        return manuscripts
+        # press_id is the stable dedupe key (HTML path + DB PK). Fall back to the
+        # metadata filename stem (files are named "{press_id}.json") when absent
+        # OR blank, so ids never collapse onto "...:None"/"...:" and overwrite.
+        press_id = metadata.get("press_id")
+        if press_id is None or not str(press_id).strip():
+            press_id = metadata_path.stem
+        else:
+            press_id = str(press_id).strip()
+
+        # Keep the back-compat url/file_name aligned: both must describe the
+        # promoted RAW attachment (PDF preferred), not necessarily file_names[0].
+        primary_url = self._primary_url(links)
+        raw_link = next(
+            (lk["link"] for lk in links if lk["role"] == SourceLinkRole.RAW.value),
+            "",
+        )
+        primary_name = raw_link.rsplit("/", 1)[-1] if raw_link else metadata_path.stem
+        return Manuscript(
+            url=primary_url,
+            file_name=primary_name,
+            metadata=metadata,
+            links=links,
+            document_id=f"ngm:ciaa-press-release:{press_id}",
+            source_type=SourceType.CIAA_PRESS_RELEASE.value,
+        )
 
     def _build_ciaa_press_releases_node(self) -> IndexNode | None:
         """Build CIAA press releases node with manuscripts and metadata."""
@@ -446,8 +582,9 @@ class IndexBuilder:
                 path = future_to_path[future]
 
                 try:
-                    manuscripts = future.result()
-                    all_manuscripts.extend(manuscripts)
+                    manuscript = future.result()
+                    if manuscript is not None:
+                        all_manuscripts.append(manuscript)
                     completed += 1
                     if completed % 100 == 0:
                         logger.info(
@@ -464,14 +601,13 @@ class IndexBuilder:
         if not all_manuscripts:
             return None
 
-        # Sort by press_id if available
+        # Sort by press_id if available (one manuscript == one press release)
         all_manuscripts.sort(key=lambda m: m.metadata.get("press_id", 0), reverse=True)
 
         # Create leaf node with manuscripts
         logger.info(
-            "ciaa-press-releases: %d manuscripts from %d release(s)",
+            "ciaa-press-releases: %d release(s) indexed",
             len(all_manuscripts),
-            len(metadata_paths),
         )
         return IndexNode(
             name="ciaa-press-releases",
@@ -493,12 +629,19 @@ class IndexBuilder:
                 f"ppmo-blacklist: {metadata_path.name} is not a JSON object"
             )
 
-        # PPMO currently doesn't have a PDF, so we use a placeholder or just the metadata
-        # For now, we'll use a placeholder URL or the source URL if available
+        # PPMO has no document file — the record itself is the content. Its only
+        # link is the SOURCE_PAGE; the structured metadata is rendered on the
+        # generated HTML landing page.
+        source_url = metadata.get("source_url", "")
+        links: list[dict[str, str]] = []
+        self._append_source_page(links, source_url)
         return Manuscript(
-            url=metadata.get("source_url", ""),
+            url=source_url,
             file_name=metadata_path.name,
             metadata=metadata,
+            links=links,
+            document_id=f"ngm:ppmo-blacklist:{_slug_with_hash(metadata_path.stem)}",
+            source_type=SourceType.MISC.value,
         )
 
     def _build_ppmo_blacklist_node(self) -> IndexNode | None:
@@ -542,20 +685,78 @@ class IndexBuilder:
             manuscripts=manuscripts,
         )
 
+    def _s3_listing_ctx(self):
+        """Return (bucket, base_prefix, boto3 client) if root_path is on S3, else
+        None. Cached. Used to list large prefixes with one recursive
+        ``list_objects_v2`` instead of cloudpathlib per-object stat calls."""
+        if not str(self.root_path).startswith("s3://"):
+            return None
+        if self._s3_ctx is None:
+            from ngm.index.publish import _make_client, parse_s3_uri
+
+            bucket, base_prefix = parse_s3_uri(str(self.root_path))
+            self._s3_ctx = (bucket, base_prefix, _make_client(None))
+        return self._s3_ctx
+
+    def _court_order_types(self) -> list[str]:
+        """List court-order types (e.g. supreme, special) under uploads/."""
+        ctx = self._s3_listing_ctx()
+        if ctx is not None:
+            bucket, base_prefix, client = ctx
+            resp = client.list_objects_v2(
+                Bucket=bucket,
+                Prefix=f"{base_prefix}uploads/court-orders/",
+                Delimiter="/",
+            )
+            head = f"{base_prefix}uploads/court-orders/"
+            return [
+                cp["Prefix"][len(head) :].rstrip("/")
+                for cp in resp.get("CommonPrefixes", [])
+                if cp["Prefix"][len(head) :].rstrip("/")
+            ]
+        court_orders_dir = self._build_folder_structure("court-orders")
+        if not court_orders_dir.exists():
+            return []
+        return [p.name for p in court_orders_dir.iterdir() if p.is_dir()]
+
+    def _list_court_type_files(self, court_type: str) -> list:
+        """All file paths under court-orders/<court_type> via ONE recursive
+        listing — NOT cloudpathlib iterdir()+is_file() per object.
+
+        is_file() on a cloud path costs a network round-trip each; at ~23k
+        court-order files that read phase took ~35 min in prod. A single
+        recursive list_objects_v2 returns the same keys in seconds. The returned
+        cloud paths are used only for ``.name`` and ``_build_url`` (pure path
+        math, no further I/O).
+        """
+        ctx = self._s3_listing_ctx()
+        if ctx is not None:
+            bucket, base_prefix, client = ctx
+            rel_prefix = f"uploads/court-orders/{court_type}/"
+            paths = []
+            for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=f"{base_prefix}{rel_prefix}"
+            ):
+                for obj in page.get("Contents", []):
+                    rel = obj["Key"][len(base_prefix) :]
+                    if not rel.rsplit("/", 1)[-1]:
+                        continue  # skip directory-marker keys
+                    paths.append(self.root_path / rel)
+            return paths
+        court_dir = self._build_folder_structure("court-orders", court_type)
+        if not court_dir.exists():
+            return []
+        return [p for p in court_dir.rglob("*") if p.is_file()]
+
     def _build_court_orders_node(self) -> IndexNode | None:
         """Build court-orders branch node with supreme and special children."""
-        court_orders_dir = self._build_folder_structure("court-orders")
-
-        if not court_orders_dir.exists():
+        court_types = self._court_order_types()
+        if not court_types:
             return None
 
         # Build children for each court type
         children = []
-        for court_path in sorted(court_orders_dir.iterdir()):
-            if not court_path.is_dir():
-                continue
-
-            court_identifier = court_path.name
+        for court_identifier in sorted(court_types):
             court_node = self._build_court_type_node(court_identifier)
             if court_node:
                 children.append(court_node)
@@ -571,9 +772,9 @@ class IndexBuilder:
 
     def _build_court_type_node(self, court_type: str) -> IndexNode | None:
         """Build branch node for a specific court type (supreme or special)."""
-        court_dir = self._build_folder_structure("court-orders", court_type)
-
-        if not court_dir.exists():
+        # ONE recursive listing instead of per-object iterdir()+is_file() stats.
+        file_paths = self._list_court_type_files(court_type)
+        if not file_paths:
             return None
 
         # Group files by year (extracted from filename pattern: YYY-...)
@@ -582,10 +783,7 @@ class IndexBuilder:
         log_interval = 10000  # Log progress every 10k files
         file_count = 0
 
-        for file_path in court_dir.iterdir():
-            if not file_path.is_file():
-                continue
-
+        for file_path in file_paths:
             file_count += 1
 
             filename = file_path.name
@@ -774,27 +972,32 @@ class IndexBuilder:
     def _build_court_case_leaf_node(
         self, court_type: str, year: str, case_number: str, file_paths: list
     ) -> IndexNode | None:
-        """Build leaf node for a specific case with manuscripts."""
-        manuscripts = []
+        """Build leaf node for a case as ONE logical-document manuscript.
 
-        for file_path in file_paths:
-            manuscripts.append(
-                Manuscript(
-                    url=self._build_url(file_path),
-                    file_name=file_path.name,
-                    metadata={},
-                )
-            )
-            # Debug logging removed to avoid 1.5M+ log lines
-
-        if not manuscripts:
+        All order files for a case (multiple versions / formats) collapse into a
+        single manuscript: the primary order is RAW, the rest ALTERNATE — the
+        DocumentSource shape, one source per case.
+        """
+        file_urls = [self._build_url(fp) for fp in file_paths]
+        links = self._file_links(file_urls)
+        if not links:
             return None
+
+        primary_url = self._primary_url(links)
+        manuscript = Manuscript(
+            url=primary_url,
+            file_name=primary_url.rsplit("/", 1)[-1],
+            metadata={},
+            links=links,
+            document_id=f"ngm:court-order:{court_type}:{case_number}",
+            source_type=SourceType.COURT_ORDER.value,
+        )
 
         # No per-case logging - summary logged at year level
         return IndexNode(
             name=case_number,
             path=f"/court-orders/{court_type}/{year}/{case_number}",
-            manuscripts=manuscripts,
+            manuscripts=[manuscript],
         )
 
     def _count_manuscripts_in_tree(self, node: IndexNode) -> int:
@@ -809,7 +1012,7 @@ class IndexBuilder:
         Collects all (path, content) pairs first (no I/O), then fires all
         writes concurrently via a thread pool.
         """
-        indices_dir = self.root_path / "indices" / self.date_str
+        indices_dir = self.output_root / "indices" / self.date_str
         indices_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("Collecting write jobs...")
@@ -849,18 +1052,43 @@ class IndexBuilder:
         logger.info("Wrote %d index files", len(pending))
 
         # Root-level alias — same content, one extra PUT
-        root_index_path = self.root_path / "index-v2.json"
+        root_index_path = self.output_root / "index-v2.json"
         root_content = self._node_to_dict_for_file(root)
         root_index_path.write_text(
             json.dumps(root_content, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         logger.info("Wrote root alias %s", root_index_path)
 
+        # SEO surface: crawlable HTML landing pages + sitemap index + robots.txt.
+        # The JSON index above stays the programmatic API; these are for crawlers.
+        self.write_seo_files(root)
+
     def _write_file(self, path, content: dict) -> None:
         """Write a single JSON file — called from thread pool."""
         path.write_text(
             json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    def _write_text(self, path, text: str) -> None:
+        """Write a single text file (HTML/XML/robots).
+
+        Parent directories are created by the caller via ``_ensure_dir`` (once
+        per unique dir) so this stays a pure write — safe to run from many
+        worker threads without redundant per-file mkdir calls at scale.
+        """
+        path.write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def _ensure_dir(directory, seen: set) -> None:
+        """mkdir -p a directory at most once (cached by string key).
+
+        HTML landing pages share a handful of parent dirs (e.g. one per court
+        type), so caching turns 1M+ would-be mkdir calls into a few.
+        """
+        key = str(directory)
+        if key not in seen:
+            directory.mkdir(parents=True, exist_ok=True)
+            seen.add(key)
 
     def _collect_write_jobs(self, node: IndexNode, indices_dir, pending: list) -> None:
         """Walk the tree and collect all (path, content) pairs without any I/O."""
@@ -998,6 +1226,269 @@ class IndexBuilder:
 
         return result
 
+    # ------------------------------------------------------------------
+    # SEO surface: crawlable HTML landing pages + sitemap index + robots.txt
+    # ------------------------------------------------------------------
+
+    def write_seo_files(self, root: IndexNode) -> None:
+        """Emit crawlable HTML pages, a sitemap index, and robots.txt to the store.
+
+        One HTML landing page per logical document (keyed by document_id under
+        ``/d/``), per-dataset child sitemaps (paginated at SITEMAP_MAX_URLS), a
+        sitemap index at ``/sitemap.xml``, and a ``/robots.txt`` pointing at it.
+        Regenerated every build, so they never drift from the JSON index.
+
+        Streaming pass: documents are rendered and written in a bounded window
+        (``_SEO_MAX_INFLIGHT``) and each child sitemap is flushed as it fills, so
+        peak memory stays flat whether there are 100 documents or 1M+ — nothing
+        accumulates the full set of rendered pages or URLs.
+        """
+        has_docs = any(
+            ms.document_id
+            for top in root.children
+            for ms in self._iter_manuscripts(top)
+        )
+        if not has_docs:
+            logger.info("SEO: no documents to publish, skipping HTML/sitemap")
+            return
+
+        child_sitemap_urls: list[str] = []
+        seen_dirs: set[str] = set()
+        inflight: deque = deque()
+        html_count = 0
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_MAX_WRITE_WORKERS
+        ) as executor:
+
+            def submit_write(path, text) -> None:
+                # Bounded window: block on the oldest write once the queue is
+                # full so at most _SEO_MAX_INFLIGHT rendered pages are alive.
+                inflight.append(executor.submit(self._write_text, path, text))
+                if len(inflight) >= _SEO_MAX_INFLIGHT:
+                    inflight.popleft().result()
+
+            for top in root.children:
+                html_count += self._write_dataset_pages(
+                    top, submit_write, child_sitemap_urls, seen_dirs
+                )
+
+            # Drain remaining HTML writes (raise on any failure).
+            while inflight:
+                inflight.popleft().result()
+
+        # Sitemap index + robots.txt at the store root (tiny, write directly).
+        self._write_text(
+            self.output_root / "sitemap.xml",
+            self._sitemap_index_xml(child_sitemap_urls),
+        )
+        self._write_text(self.output_root / "robots.txt", self._robots_txt())
+
+        logger.info(
+            "SEO: wrote %d HTML page(s) + %d sitemap file(s) + robots.txt",
+            html_count,
+            len(child_sitemap_urls) + 1,
+        )
+
+    def _write_dataset_pages(
+        self,
+        top: IndexNode,
+        submit_write,
+        child_sitemap_urls: list[str],
+        seen_dirs: set,
+    ) -> int:
+        """Stream one dataset: write each document's HTML page and flush child
+        sitemaps as they fill. Returns the number of HTML pages written."""
+        dataset = top.name
+        page_locs: list[str] = []
+        page_num = 0
+        html_count = 0
+
+        def flush_sitemap() -> None:
+            nonlocal page_num, page_locs
+            if not page_locs:
+                return
+            suffix = "" if page_num == 0 else f".page-{page_num + 1}"
+            fname = f"sitemap.{dataset}{suffix}.xml"
+            self._write_text(
+                self.output_root / fname, self._sitemap_urlset_xml(page_locs)
+            )
+            child_sitemap_urls.append(f"{self.base_url}/{fname}")
+            page_num += 1
+            page_locs = []
+
+        for ms in self._iter_manuscripts(top):
+            if not ms.document_id:
+                continue
+            page_rel = self._document_html_relpath(ms.document_id)
+            path = self.output_root / page_rel
+            self._ensure_dir(path.parent, seen_dirs)
+            submit_write(path, self._render_document_html(ms))
+            page_locs.append(f"{self.base_url}/{page_rel}")
+            html_count += 1
+            if len(page_locs) >= SITEMAP_MAX_URLS:
+                flush_sitemap()
+        flush_sitemap()
+        return html_count
+
+    def _iter_manuscripts(self, node: IndexNode):
+        """Lazily yield every manuscript under a node (no full list built)."""
+        yield from node.manuscripts
+        for child in node.children:
+            yield from self._iter_manuscripts(child)
+
+    @staticmethod
+    def _document_title(ms: Manuscript) -> str:
+        meta = ms.metadata or {}
+        return str(meta.get("title") or ms.file_name or ms.document_id or "Document")
+
+    @staticmethod
+    def _document_description(ms: Manuscript) -> str:
+        meta = ms.metadata or {}
+        text = meta.get("full_text") or meta.get("title") or ""
+        return " ".join(str(text).split())[:300]
+
+    def _render_document_html(self, ms: Manuscript) -> str:
+        """Render a self-contained, crawlable HTML landing page for a document."""
+        title = self._document_title(ms)
+        description = self._document_description(ms)
+        canonical = self._document_url(ms.document_id)
+        meta = ms.metadata or {}
+        pub_date = meta.get("publication_date") or meta.get("date") or ""
+
+        role_labels = {
+            SourceLinkRole.RAW.value: "Download document",
+            SourceLinkRole.ALTERNATE.value: "Alternate format",
+            SourceLinkRole.SOURCE_PAGE.value: "Original source page",
+            SourceLinkRole.MARKDOWN.value: "Text transcript (Markdown)",
+            SourceLinkRole.PERMALINK.value: "Permalink",
+        }
+        link_items = []
+        for link in ms.links:
+            label = role_labels.get(link.get("role"), link.get("role") or "Link")
+            href = html.escape(link.get("link", ""), quote=True)
+            link_items.append(
+                f'<li><a href="{href}" rel="noopener">{html.escape(label)}</a></li>'
+            )
+        links_html = "\n".join(link_items) or "<li>No files available.</li>"
+
+        has_markdown = any(
+            link.get("role") == SourceLinkRole.MARKDOWN.value for link in ms.links
+        )
+        transcript_html = (
+            ""
+            if has_markdown
+            else "<p><em>A text transcript of this document is being prepared.</em></p>"
+        )
+
+        jsonld: dict[str, Any] = {
+            "@context": "https://schema.org",
+            "@type": "CreativeWork",
+            "name": title,
+            "url": canonical,
+            "identifier": ms.document_id,
+            "inLanguage": "ne",
+            "isAccessibleForFree": True,
+            "publisher": {"@type": "Organization", "name": "Jawafdehi NGM"},
+        }
+        if pub_date:
+            jsonld["datePublished"] = str(pub_date)
+        raw_link = next(
+            (
+                link.get("link", "")
+                for link in ms.links
+                if link.get("role") == SourceLinkRole.RAW.value
+            ),
+            "",
+        )
+        if raw_link:
+            jsonld["associatedMedia"] = {"@type": "MediaObject", "contentUrl": raw_link}
+
+        date_html = (
+            f"<p><strong>Publication date:</strong> {html.escape(str(pub_date))}</p>"
+            if pub_date
+            else ""
+        )
+        full_text = meta.get("full_text")
+        body_text = (
+            f"<section><p>{html.escape(' '.join(str(full_text).split()))}</p></section>"
+            if full_text
+            else ""
+        )
+        a = html.escape  # local alias for brevity below
+        # Escape <, >, & so scraped text containing "</script>" (or "<!--")
+        # cannot break out of the JSON-LD <script> block. These are valid JSON
+        # string escapes, so the structured data still parses — this is the
+        # standard guard for inlining JSON into an HTML <script>.
+        jsonld_str = (
+            json.dumps(jsonld, ensure_ascii=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+        return f"""<!DOCTYPE html>
+<html lang="ne">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{a(title)} — Jawafdehi NGM</title>
+<meta name="description" content="{a(description, quote=True)}">
+<link rel="canonical" href="{a(canonical, quote=True)}">
+<meta property="og:type" content="article">
+<meta property="og:title" content="{a(title, quote=True)}">
+<meta property="og:description" content="{a(description, quote=True)}">
+<meta property="og:url" content="{a(canonical, quote=True)}">
+<meta name="robots" content="index, follow">
+<script type="application/ld+json">{jsonld_str}</script>
+</head>
+<body>
+<main>
+<h1>{a(title)}</h1>
+{date_html}
+{body_text}
+{transcript_html}
+<h2>Files &amp; sources</h2>
+<ul>
+{links_html}
+</ul>
+<p><small>Document ID: {a(ms.document_id)} · Part of the <a href="{a(self.base_url, quote=True)}/index-v2.json">NGM open archive</a>.</small></p>
+</main>
+</body>
+</html>
+"""
+
+    def _sitemap_urlset_xml(self, locs: list[str]) -> str:
+        """Build a <urlset> sitemap listing document landing-page URLs."""
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        ]
+        for loc in locs:
+            lines.append("  <url>")
+            lines.append(f"    <loc>{html.escape(loc)}</loc>")
+            lines.append(f"    <lastmod>{self.date_str}</lastmod>")
+            lines.append("  </url>")
+        lines.append("</urlset>")
+        return "\n".join(lines) + "\n"
+
+    def _sitemap_index_xml(self, sitemap_urls: list[str]) -> str:
+        """Build the <sitemapindex> referencing all per-dataset child sitemaps."""
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        ]
+        for url in sitemap_urls:
+            lines.append("  <sitemap>")
+            lines.append(f"    <loc>{html.escape(url)}</loc>")
+            lines.append(f"    <lastmod>{self.date_str}</lastmod>")
+            lines.append("  </sitemap>")
+        lines.append("</sitemapindex>")
+        return "\n".join(lines) + "\n"
+
+    def _robots_txt(self) -> str:
+        """robots.txt allowing all crawlers and pointing at the sitemap index."""
+        return f"User-agent: *\nAllow: /\n\nSitemap: {self.base_url}/sitemap.xml\n"
+
 
 def get_base_url() -> str:
     """Get the base URL from environment, defaulting to the production ngm store."""
@@ -1006,8 +1497,22 @@ def get_base_url() -> str:
     )
 
 
+def _db_index_enabled() -> bool:
+    return os.getenv("NGM_SKIP_DB_INDEX", "").lower() not in ("1", "true", "yes")
+
+
 def main() -> None:
-    """Build and write the hierarchical index."""
+    """Build the index, mirror it into Postgres, and publish it to the store.
+
+    With an ``s3://`` FILES_STORE the derived tree is built to a LOCAL staging dir
+    and bulk-uploaded + synced to R2 once at the end (fast local disk, one upload
+    pass, stale remote objects pruned). With a local FILES_STORE the tree is
+    written in place (no staging/publish) — used by tests and serve_test_index.
+
+    Set ``NGM_DRY_RUN=1`` to build from the (cloud) read store to local staging
+    with NO writes back — no R2 publish and no DB sync — so a real rebuild can be
+    measured/inspected with read-only access to the store.
+    """
     files_store_env = os.getenv("FILES_STORE")
     if not files_store_env:
         logger.error("FILES_STORE environment variable must be set.")
@@ -1016,33 +1521,117 @@ def main() -> None:
     files_store = str(files_store_env)
     base_url = get_base_url()
     date_str = datetime.now().strftime("%Y-%m-%d")
+    remote = files_store.startswith("s3://")
+    # Dry run: build the full tree from the (possibly cloud) read store to local
+    # staging, but make NO writes back to the store — no R2 publish, no DB sync.
+    # This lets a real build be measured/inspected with read-only access to R2.
+    dry_run = os.getenv("NGM_DRY_RUN", "").lower() in ("1", "true", "yes")
 
-    logger.info("Building index ....")
-    logger.info("Files store: %s", files_store)
+    # Build to local staging when reading from a cloud store; pinned dirs (set
+    # via env) are left in place, ad-hoc temp dirs are cleaned up in finally
+    # (a dry-run keeps the staging dir so its output can be inspected).
+    pinned_staging = os.getenv("INDEX_STAGING_DIR")
+    staging_dir = None
+    output_path = None
+    if remote:
+        staging_dir = pinned_staging or tempfile.mkdtemp(prefix="ngm-index-")
+        output_path = staging_dir
+
+    logger.info(
+        "Building index ....%s", "  [DRY RUN — no publish/DB]" if dry_run else ""
+    )
+    logger.info("Files store (read): %s", files_store)
+    logger.info("Output (write): %s", output_path or files_store)
     logger.info("Base URL: %s", base_url)
     logger.info("Date: %s", date_str)
 
-    builder = IndexBuilder(files_store, base_url, date_str)
-
-    # Build tree
-    root = builder.build_tree()
-    logger.info("Tree built successfully")
-
-    # Validate tree
     try:
-        root.validate()
-        logger.info("Tree validation passed")
-    except ValueError as e:
-        logger.error("Tree validation failed: %s", e)
-        raise SystemExit(1) from None
+        builder = IndexBuilder(files_store, base_url, date_str, output_path=output_path)
 
-    # Write files
-    try:
-        builder.write_index_files(root)
+        root = builder.build_tree()
+        logger.info("Tree built successfully")
+
+        try:
+            root.validate()
+            logger.info("Tree validation passed")
+        except ValueError as e:
+            logger.error("Tree validation failed: %s", e)
+            raise SystemExit(1) from None
+
+        try:
+            builder.write_index_files(root)
+            logger.info("Index files written to %s", builder.output_root)
+        except (OSError, TypeError, RuntimeError) as e:
+            logger.error("Failed to write index files: %s", e)
+            raise SystemExit(1) from None
+
+        # Safety gate: a build with zero documents is almost always a read/scrape
+        # failure (all source dirs missing), not a real empty archive. Publishing
+        # it would sync-delete every live HTML page + sitemap, and the DB mirror
+        # would (next day) drop every row. Refuse to mirror an empty build.
+        total_docs = builder._count_manuscripts_in_tree(root)
+        if total_docs == 0:
+            logger.error(
+                "Build produced 0 documents — skipping DB sync and publish to "
+                "avoid wiping the live store (likely a source-read failure)."
+            )
+            raise SystemExit(1)
+
+        # The Postgres mirror and the R2 publish are independent: a failure in
+        # one must not skip the other (both self-heal on the next run). Attempt
+        # both, then fail the job non-zero if either errored.
+        errors: list[str] = []
+
+        # A per-run timestamp (not just the date) so a same-day rebuild still
+        # prunes documents that vanished since an earlier run on the same day.
+        build_id = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if dry_run:
+            logger.info(
+                "DRY RUN: %d documents built to %s — skipping DB sync and publish.",
+                total_docs,
+                builder.output_root,
+            )
+            return
+
+        if _db_index_enabled():
+            from ngm.index.db_index import sync_document_sources
+
+            try:
+                stats = sync_document_sources(root, base_url, build_id)
+                logger.info(
+                    "document_sources synced: upserted=%d deleted=%d",
+                    stats["upserted"],
+                    stats["deleted"],
+                )
+            except Exception:
+                logger.exception("Failed to sync document_sources index")
+                errors.append("document_sources")
+
+        if remote:
+            from ngm.index.publish import publish
+
+            try:
+                stats = publish(staging_dir, files_store, date_str)
+                logger.info(
+                    "Published to %s: uploaded=%d deleted=%d",
+                    files_store,
+                    stats["uploaded"],
+                    stats["deleted"],
+                )
+            except Exception:
+                logger.exception("Failed to publish index to %s", files_store)
+                errors.append("publish")
+
+        if errors:
+            logger.error("Index build finished with failures: %s", ", ".join(errors))
+            raise SystemExit(1)
+
         logger.info("Index build completed successfully")
-    except (OSError, TypeError, RuntimeError) as e:
-        logger.error("Failed to write index files: %s", e)
-        raise SystemExit(1) from None
+    finally:
+        # Keep the staging dir on a dry run so its output can be inspected.
+        if staging_dir and not pinned_staging and not dry_run:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
