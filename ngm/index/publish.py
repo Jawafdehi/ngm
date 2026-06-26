@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import boto3
+from botocore.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +112,14 @@ def local_keys(staging_dir: Path) -> set[str]:
 
 
 def _make_client(endpoint_url: str | None):
+    # Size the connection pool to the upload worker count. boto3 defaults to 10,
+    # but _upload runs _UPLOAD_WORKERS threads — a smaller pool thrashes
+    # ("Connection pool is full, discarding connection") and slows the upload.
     return boto3.client(
         "s3",
         endpoint_url=endpoint_url or os.getenv("AWS_ENDPOINT_URL"),
         region_name=os.getenv("AWS_REGION", "auto"),
+        config=Config(max_pool_connections=_UPLOAD_WORKERS),
     )
 
 
