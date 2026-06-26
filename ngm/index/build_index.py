@@ -102,6 +102,9 @@ class IndexBuilder:
         # Database engine for fiscal year validation (lazy initialized)
         # Sessions are created per-thread to avoid threading issues
         self._engine = None
+        # Cached (bucket, base_prefix, boto3 client) when root_path is on S3,
+        # used for fast recursive listings (see _list_court_type_files).
+        self._s3_ctx = None
 
     @property
     def engine(self):
@@ -682,20 +685,78 @@ class IndexBuilder:
             manuscripts=manuscripts,
         )
 
+    def _s3_listing_ctx(self):
+        """Return (bucket, base_prefix, boto3 client) if root_path is on S3, else
+        None. Cached. Used to list large prefixes with one recursive
+        ``list_objects_v2`` instead of cloudpathlib per-object stat calls."""
+        if not str(self.root_path).startswith("s3://"):
+            return None
+        if self._s3_ctx is None:
+            from ngm.index.publish import _make_client, parse_s3_uri
+
+            bucket, base_prefix = parse_s3_uri(str(self.root_path))
+            self._s3_ctx = (bucket, base_prefix, _make_client(None))
+        return self._s3_ctx
+
+    def _court_order_types(self) -> list[str]:
+        """List court-order types (e.g. supreme, special) under uploads/."""
+        ctx = self._s3_listing_ctx()
+        if ctx is not None:
+            bucket, base_prefix, client = ctx
+            resp = client.list_objects_v2(
+                Bucket=bucket,
+                Prefix=f"{base_prefix}uploads/court-orders/",
+                Delimiter="/",
+            )
+            head = f"{base_prefix}uploads/court-orders/"
+            return [
+                cp["Prefix"][len(head) :].rstrip("/")
+                for cp in resp.get("CommonPrefixes", [])
+                if cp["Prefix"][len(head) :].rstrip("/")
+            ]
+        court_orders_dir = self._build_folder_structure("court-orders")
+        if not court_orders_dir.exists():
+            return []
+        return [p.name for p in court_orders_dir.iterdir() if p.is_dir()]
+
+    def _list_court_type_files(self, court_type: str) -> list:
+        """All file paths under court-orders/<court_type> via ONE recursive
+        listing — NOT cloudpathlib iterdir()+is_file() per object.
+
+        is_file() on a cloud path costs a network round-trip each; at ~23k
+        court-order files that read phase took ~35 min in prod. A single
+        recursive list_objects_v2 returns the same keys in seconds. The returned
+        cloud paths are used only for ``.name`` and ``_build_url`` (pure path
+        math, no further I/O).
+        """
+        ctx = self._s3_listing_ctx()
+        if ctx is not None:
+            bucket, base_prefix, client = ctx
+            rel_prefix = f"uploads/court-orders/{court_type}/"
+            paths = []
+            for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=f"{base_prefix}{rel_prefix}"
+            ):
+                for obj in page.get("Contents", []):
+                    rel = obj["Key"][len(base_prefix) :]
+                    if not rel.rsplit("/", 1)[-1]:
+                        continue  # skip directory-marker keys
+                    paths.append(self.root_path / rel)
+            return paths
+        court_dir = self._build_folder_structure("court-orders", court_type)
+        if not court_dir.exists():
+            return []
+        return [p for p in court_dir.rglob("*") if p.is_file()]
+
     def _build_court_orders_node(self) -> IndexNode | None:
         """Build court-orders branch node with supreme and special children."""
-        court_orders_dir = self._build_folder_structure("court-orders")
-
-        if not court_orders_dir.exists():
+        court_types = self._court_order_types()
+        if not court_types:
             return None
 
         # Build children for each court type
         children = []
-        for court_path in sorted(court_orders_dir.iterdir()):
-            if not court_path.is_dir():
-                continue
-
-            court_identifier = court_path.name
+        for court_identifier in sorted(court_types):
             court_node = self._build_court_type_node(court_identifier)
             if court_node:
                 children.append(court_node)
@@ -711,9 +772,9 @@ class IndexBuilder:
 
     def _build_court_type_node(self, court_type: str) -> IndexNode | None:
         """Build branch node for a specific court type (supreme or special)."""
-        court_dir = self._build_folder_structure("court-orders", court_type)
-
-        if not court_dir.exists():
+        # ONE recursive listing instead of per-object iterdir()+is_file() stats.
+        file_paths = self._list_court_type_files(court_type)
+        if not file_paths:
             return None
 
         # Group files by year (extracted from filename pattern: YYY-...)
@@ -722,10 +783,7 @@ class IndexBuilder:
         log_interval = 10000  # Log progress every 10k files
         file_count = 0
 
-        for file_path in court_dir.iterdir():
-            if not file_path.is_file():
-                continue
-
+        for file_path in file_paths:
             file_count += 1
 
             filename = file_path.name
