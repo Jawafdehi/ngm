@@ -465,6 +465,57 @@ Index(
 )
 
 
+class DocumentSourceIndex(Base):
+    """Up-to-date index of every NGM document source (one row per logical doc).
+
+    Populated from the index build for all datasets (CIAA press releases &
+    annual reports, Kanun Patrika, court orders, PPMO blacklist), so the whole
+    archive is SQL-queryable alongside the court tables. Mirrors the index:
+    each build upserts rows (stamping ``last_seen_build``) and deletes rows whose
+    ``last_seen_build`` is stale. Shape matches the Jawafdehi API DocumentSource
+    (``links`` is the roled-link list) for a clean future import.
+    """
+
+    __tablename__ = "document_sources"
+
+    # Stable id, e.g. "ngm:ciaa-press-release:1234".
+    document_id = Column(String(200), primary_key=True)
+
+    dataset = Column(String(50), nullable=False, index=True)
+    source_type = Column(String(50), nullable=False, index=True)
+
+    title = Column(Text, nullable=True)
+    publication_date_bs = Column(String(20), nullable=True)
+
+    primary_url = Column(Text, nullable=True)  # the RAW link (back-compat url)
+    html_url = Column(Text, nullable=False)  # crawlable landing page
+
+    # Roled links [{link, role}] — the DocumentSource.url shape.
+    links = Column(JSONB, nullable=False, default=list)
+    # Source metadata (named doc_metadata: ``metadata`` is reserved by SQLAlchemy).
+    doc_metadata = Column(JSONB, nullable=False, default=dict)
+
+    index_path = Column(String, nullable=True)  # node path in the index tree
+
+    # Build marker used for the mirror sweep (delete rows not seen this build).
+    last_seen_build = Column(String(40), nullable=False, index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    def __repr__(self):
+        return f"<DocumentSourceIndex(id={self.document_id}, dataset={self.dataset})>"
+
+
+Index(
+    "idx_document_sources_dataset_type",
+    DocumentSourceIndex.dataset,
+    DocumentSourceIndex.source_type,
+)
+
+
 # Database connection helpers
 
 # Global engine instance (singleton pattern)
