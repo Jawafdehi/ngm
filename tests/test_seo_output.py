@@ -4,6 +4,8 @@ crawlable HTML landing pages, a sitemap index, per-dataset child sitemaps
 (paginated at the 50k-URL limit), and robots.txt.
 """
 
+import json
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -158,3 +160,25 @@ class TestSeoFiles:
         make_builder(tmp_path).write_seo_files(IndexNode(name="root", path="/"))
         assert not (tmp_path / "sitemap.xml").exists()
         assert not (tmp_path / "robots.txt").exists()
+
+    def test_jsonld_escapes_script_breakout(self, tmp_path):
+        """Scraped text containing </script> must not break out of the JSON-LD."""
+        ms = make_doc(
+            "ngm:kanun-patrika:evil",
+            name="x.pdf",
+            metadata={
+                "title": "Evil </script><script>alert(1)</script>",
+                "full_text": "body",
+            },
+        )
+        page = make_builder(tmp_path)._render_document_html(ms)
+
+        # Only the real closing tag remains literal; the title's is escaped.
+        assert page.count("</script>") == 1
+        assert "\\u003c/script\\u003e" in page
+
+        # The JSON-LD still parses and round-trips the original title.
+        block = re.search(
+            r'<script type="application/ld\+json">(.*?)</script>', page, re.S
+        ).group(1)
+        assert json.loads(block)["name"] == "Evil </script><script>alert(1)</script>"

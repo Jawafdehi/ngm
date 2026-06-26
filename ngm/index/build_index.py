@@ -1326,6 +1326,16 @@ class IndexBuilder:
             else ""
         )
         a = html.escape  # local alias for brevity below
+        # Escape <, >, & so scraped text containing "</script>" (or "<!--")
+        # cannot break out of the JSON-LD <script> block. These are valid JSON
+        # string escapes, so the structured data still parses — this is the
+        # standard guard for inlining JSON into an HTML <script>.
+        jsonld_str = (
+            json.dumps(jsonld, ensure_ascii=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
         return f"""<!DOCTYPE html>
 <html lang="ne">
 <head>
@@ -1339,7 +1349,7 @@ class IndexBuilder:
 <meta property="og:description" content="{a(description, quote=True)}">
 <meta property="og:url" content="{a(canonical, quote=True)}">
 <meta name="robots" content="index, follow">
-<script type="application/ld+json">{json.dumps(jsonld, ensure_ascii=False)}</script>
+<script type="application/ld+json">{jsonld_str}</script>
 </head>
 <body>
 <main>
@@ -1454,16 +1464,32 @@ def main() -> None:
             logger.error("Failed to write index files: %s", e)
             raise SystemExit(1) from None
 
+        # Safety gate: a build with zero documents is almost always a read/scrape
+        # failure (all source dirs missing), not a real empty archive. Publishing
+        # it would sync-delete every live HTML page + sitemap, and the DB mirror
+        # would (next day) drop every row. Refuse to mirror an empty build.
+        total_docs = builder._count_manuscripts_in_tree(root)
+        if total_docs == 0:
+            logger.error(
+                "Build produced 0 documents — skipping DB sync and publish to "
+                "avoid wiping the live store (likely a source-read failure)."
+            )
+            raise SystemExit(1)
+
         # The Postgres mirror and the R2 publish are independent: a failure in
         # one must not skip the other (both self-heal on the next run). Attempt
         # both, then fail the job non-zero if either errored.
         errors: list[str] = []
 
+        # A per-run timestamp (not just the date) so a same-day rebuild still
+        # prunes documents that vanished since an earlier run on the same day.
+        build_id = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
         if _db_index_enabled():
             from ngm.index.db_index import sync_document_sources
 
             try:
-                stats = sync_document_sources(root, base_url, date_str)
+                stats = sync_document_sources(root, base_url, build_id)
                 logger.info(
                     "document_sources synced: upserted=%d deleted=%d",
                     stats["upserted"],

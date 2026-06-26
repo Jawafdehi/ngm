@@ -6,6 +6,9 @@ local staging dir), leaving the read store untouched.
 
 import json
 
+import pytest
+
+from ngm.index import build_index
 from ngm.index.build_index import IndexBuilder
 
 
@@ -62,3 +65,12 @@ def test_default_output_root_equals_read_root(tmp_path):
     # No output_path → writes land in the read root (legacy/local behavior).
     assert (tmp_path / "index-v2.json").exists()
     assert (tmp_path / "sitemap.xml").exists()
+
+
+def test_main_aborts_on_empty_build(tmp_path, monkeypatch):
+    """A 0-document build must abort (not mirror/publish an empty store)."""
+    monkeypatch.setenv("FILES_STORE", str(tmp_path))  # local, empty (no uploads/)
+    monkeypatch.setenv("NGM_SKIP_DB_INDEX", "1")
+    with pytest.raises(SystemExit) as exc:
+        build_index.main()
+    assert exc.value.code == 1

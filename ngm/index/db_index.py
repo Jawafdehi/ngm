@@ -10,7 +10,7 @@ than a giant ``NOT IN``, so it scales to 1M+ rows.
 
 import logging
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ngm.database.models import (
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 _UPSERT_BATCH = 1000
 
-# Columns refreshed when a document_id already exists (everything except the
-# PK and created_at). updated_at is set from the build marker change below.
+# Columns refreshed when a document_id already exists (everything except the PK,
+# created_at, and updated_at — updated_at is set to now() on conflict below).
 _UPDATE_COLS = (
     "dataset",
     "source_type",
@@ -101,9 +101,10 @@ def sync_document_sources(root, base_url: str, build_id: str, engine=None) -> di
             for i in range(0, len(rows), _UPSERT_BATCH):
                 batch = rows[i : i + _UPSERT_BATCH]
                 stmt = pg_insert(DocumentSourceIndex).values(batch)
+                set_clause = {c: getattr(stmt.excluded, c) for c in _UPDATE_COLS}
+                set_clause["updated_at"] = func.now()
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=["document_id"],
-                    set_={c: getattr(stmt.excluded, c) for c in _UPDATE_COLS},
+                    index_elements=["document_id"], set_=set_clause
                 )
                 session.execute(stmt)
 
