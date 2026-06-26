@@ -8,9 +8,10 @@ Priority based on court order document availability: Special/CR → Supreme/WH �
 
 Rate limiting
 ─────────────
-The spider processes ~600 cases/hour by default in prod/GitHub Actions.
-Each GitHub Actions job runs up to 6 hours (~3000 cases/job with 1-hour buffer). The workflow
-re-triggers every 8 hours so there is continuous coverage.
+The spider processes ~600 cases/hour by default in prod. It runs as the
+`ngm-supreme-court-orders` Kubernetes CronJob (schedule `0 0,8,16 * * *` UTC,
+every 8h) defined in the infra repo (k8s/ngm/cronjobs.yaml), processing up to
+`limit` cases (default 3000) per run.
 
 Override the rate locally:
     scrapy crawl supreme_court_orders -s DOWNLOAD_DELAY=0 -a limit=500
@@ -339,11 +340,33 @@ class SupremeCourtOrdersSpider(scrapy.Spider):
                 "Set ENABLE_CAPTCHA_COOKIE_EXTRACT=True to run this spider."
             )
 
-        try:
-            cases = self._get_cases_to_scrape()
-        except Exception:
-            self.logger.exception("Failed to query cases — aborting spider")
-            return
+        cases = None
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                cases = self._get_cases_to_scrape()
+                break
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    f"Case query failed (attempt {attempt}/3): {exc}. "
+                    "Resetting DB connection and retrying."
+                )
+                try:
+                    if getattr(self, "session", None):
+                        self.session.close()
+                    self.engine.dispose()
+                    self.session = get_session(self.engine)
+                except Exception:
+                    self.logger.exception("Failed to reset DB session before retry")
+
+        if cases is None:
+            # Don't silently green-complete on a DB failure — surface it loudly so
+            # the CronJob run is visibly broken instead of reporting Total: 0.
+            self.logger.critical(
+                "Failed to query cases after retries — aborting spider"
+            )
+            raise last_error
 
         if not cases:
             self.logger.warning("No cases found to scrape")
