@@ -188,6 +188,16 @@ def parse_case_status(raw: str | None) -> ParsedCaseStatus:
     return ParsedCaseStatus(lifecycle_status=UNKNOWN)
 
 
+def is_status_artifact(value: str | None) -> bool:
+    """True if ``value`` is a scraped table-header/label wrongly stored as a status.
+
+    Used by the backfill to clear the ~103k Supreme rows whose case_status is the
+    ``आदेश /फैसलाको किसिम`` column header (DQ-01).
+    """
+    text = normalize_whitespace(value or "")
+    return bool(text) and _despace(text) in {_despace(h) for h in _HEADER_LABELS}
+
+
 def apply_status(target: dict, raw_value: str | None) -> None:
     """Fill a CourtCase update-dict's status columns from a raw status string.
 
