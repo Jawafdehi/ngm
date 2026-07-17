@@ -1,5 +1,12 @@
 # Nepal Government Modernization (NGM)
 
+> ## ⚠️ This repository is archived
+>
+> NGM has been **superseded by the consolidated Jawafdehi platform monorepo**, where
+> court-case ingestion (crawling, normalization, and serving) now lives as the `courts`
+> Django app and the crawlers run as Django management commands. This repository is kept
+> for history only — it is no longer maintained and receives no further changes.
+
 **Judicial Data Scrapers for Nepal's Court System**
 
 ## Overview
