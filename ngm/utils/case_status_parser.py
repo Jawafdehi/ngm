@@ -224,9 +224,14 @@ def verdict_from_hearings(hearings) -> str | None:
     if not hearings:
         return None
     for hearing in reversed(hearings):
-        if (hearing.get("case_status") or "").strip() != "फैसला":
+        # Two hearing key-schemas exist: Special uses case_status/decision_type,
+        # Supreme uses status/order_type. Accept either.
+        status = (hearing.get("case_status") or hearing.get("status") or "").strip()
+        if status != "फैसला":
             continue
-        decision = normalize_whitespace(hearing.get("decision_type") or "")
+        decision = normalize_whitespace(
+            hearing.get("decision_type") or hearing.get("order_type") or ""
+        )
         for key, verdict in _HEARING_DECISION_MAP.items():
             if key in decision:
                 return verdict

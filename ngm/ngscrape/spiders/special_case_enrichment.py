@@ -17,7 +17,7 @@ from ngm.ngscrape.base_spiders import (
     convert_bs_to_ad,
 )
 from ngm.utils.normalizer import normalize_whitespace, normalize_date
-from ngm.utils.case_status_parser import apply_status
+from ngm.utils.case_status_parser import apply_status, verdict_from_hearings
 
 COURT_ID = "special"
 
@@ -157,6 +157,13 @@ class SpecialCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
             extra["plaintiff_advocates"] = hearings_timeline["plaintiff_advocates"]
         if "defendant_advocates" in hearings_timeline:
             extra["defendant_advocates"] = hearings_timeline["defendant_advocates"]
+
+        # Special status is paren-date, so the outcome isn't in case_status;
+        # derive verdict_type from the final decisive hearing when still unset.
+        if not enrichment_data.get("verdict_type"):
+            fallback = verdict_from_hearings(extra["enrichment_hearings"])
+            if fallback:
+                enrichment_data["verdict_type"] = fallback
 
         self.save_enrichment(case_number, COURT_ID, enrichment_data, extra, entities)
         self.logger.info(

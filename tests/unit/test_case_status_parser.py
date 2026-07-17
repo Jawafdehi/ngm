@@ -134,6 +134,15 @@ def test_verdict_from_hearings_conviction():
     assert verdict_from_hearings(hearings) == CONVICTED
 
 
+def test_verdict_from_hearings_supreme_key_schema():
+    # Supreme stores status/order_type instead of case_status/decision_type.
+    hearings = [
+        {"date": "2081-05-01", "judges": "x", "status": "आदेश", "order_type": "अन्य आदेश"},
+        {"date": "2081-09-11", "judges": "y", "status": "फैसला", "order_type": "ठहर"},
+    ]
+    assert verdict_from_hearings(hearings) == CONVICTED
+
+
 def test_verdict_from_hearings_none_when_interlocutory_only():
     hearings = [
         {"case_status": "स्थगित", "decision_type": "प्र.को कानुन ब्यवसायी बाट"},
