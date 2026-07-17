@@ -239,7 +239,16 @@ class BaseCourtCasesSpider(BaseScrapeSpider):
         try:
             with self.session.begin():
                 for case, hearing in data:
-                    self.session.merge(case)
+                    # merge() replaces the whole JSONB extra_data column, which would
+                    # clobber an existing (e.g. already-enriched) row's extra_data with
+                    # just this listing's stash. Unset it on the transient object so the
+                    # stored value survives the merge, then union the listing keys on top.
+                    incoming_extra = case.extra_data
+                    case.__dict__.pop("extra_data", None)
+                    merged = self.session.merge(case)
+                    if incoming_extra:
+                        merged.extra_data = {**(merged.extra_data or {}), **incoming_extra}
+                        flag_modified(merged, "extra_data")
                     self.session.add(hearing)
                 mark_date_scraped(self.session, court_key, date_bs, note)
         finally:
