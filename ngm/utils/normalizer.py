@@ -41,6 +41,19 @@ def nepali_to_roman_numerals(text):
     return result
 
 
+def coerce_count(value):
+    """Parse a scraped count (e.g. hearing_count) to an int, Nepali or ASCII digits.
+
+    Returns ``None`` when there is no parseable number, so an Integer column stays
+    NULL rather than erroring on a non-numeric string like "" or "N/A".
+    """
+    if value is None:
+        return None
+    romanized = nepali_to_roman_numerals(str(value))
+    digits = "".join(ch for ch in romanized if ch in "0123456789")
+    return int(digits) if digits else None
+
+
 def roman_to_nepali_numerals(text):
     """Convert Roman numerals (ASCII digits) to Nepali numerals (Devanagari digits)"""
     if not text:

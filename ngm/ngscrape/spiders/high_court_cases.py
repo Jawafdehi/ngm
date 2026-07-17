@@ -251,9 +251,10 @@ class HighCourtCasesSpider(BaseCourtCasesSpider):
                 registration_date_bs=registration_date,
                 registration_date_ad=convert_bs_to_ad(registration_date),
                 case_type=case_type,
-                division=division,
                 plaintiff=plaintiff,
                 defendant=defendant,
+                # division → extra_data, not a v2 column.
+                extra_data={"division": division},
             )
             self.case_cache.set(case)
 

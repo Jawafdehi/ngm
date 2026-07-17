@@ -216,10 +216,13 @@ class SpecialCourtCasesSpider(BaseCourtCasesSpider):
                 registration_date_bs=registration_date,
                 registration_date_ad=convert_bs_to_ad(registration_date),
                 case_type=case_type,
-                category=category,
                 plaintiff=plaintiff,
                 defendant=defendant,
-                original_case_number=original_case_number,
+                # category / original_case_number → extra_data, not v2 columns.
+                extra_data={
+                    "category": category,
+                    "original_case_number": original_case_number,
+                },
             )
             self.case_cache.set(case)
 

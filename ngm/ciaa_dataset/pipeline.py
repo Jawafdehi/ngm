@@ -138,8 +138,11 @@ def run_fiscal_year(
                     case.case_number,
                     supreme_case_no,
                 )
-        elif case.original_case_number:
-            appeal = loader.load_supreme_court_case(case.original_case_number)
+        elif (case.extra_data or {}).get("original_case_number"):
+            # original_case_number is stashed in extra_data (not a v2 column).
+            appeal = loader.load_supreme_court_case(
+                case.extra_data["original_case_number"]
+            )
 
         # Load defendants
         defendants = loader.load_defendants(case.case_number, case.court_identifier)

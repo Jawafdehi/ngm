@@ -1,9 +1,9 @@
 """End-to-end test of the shared enrichment save against a real (SQLite) DB.
 
 Exercises the fixes that live in BaseCaseEnrichmentSpider.save_enrichment:
-entity dedup + junk/placeholder stripping (I10/I11), the formerly-phantom
-columns now persisting (enriched_at/case_subject/hearing_count/verdict_type),
-and single-transaction idempotency (I3/C3).
+entity dedup + junk/placeholder stripping (I10/I11), the typed columns
+persisting (case_subject/hearing_count/verdict_type), enriched_at stashed in
+extra_data (a v2 non-column), and single-transaction idempotency (I3/C3).
 """
 
 from ngm.database.models import CaseEntity, CourtCase
@@ -51,7 +51,7 @@ def test_save_enrichment_roundtrip(session):
     core = {
         "case_type": "भ्रष्टाचार",
         "case_subject": "घुस लिएको",
-        "hearing_count": "3",
+        "hearing_count": 3,  # spiders coerce to int (Integer column in v2)
         "verdict_type": "फैसला",
     }
     extra = {"enrichment_hearings": [{"date": "2081-01-01"}]}
@@ -67,9 +67,9 @@ def test_save_enrichment_roundtrip(session):
             .first()
         )
         assert case.status == "enriched"
-        assert case.enriched_at is not None  # was a silent no-op before the schema fix
+        assert case.extra_data["enriched_at"] is not None  # stashed in extra_data (v2)
         assert case.case_subject == "घुस लिएको"
-        assert case.hearing_count == "3"
+        assert case.hearing_count == 3
         assert case.verdict_type == "फैसला"
         assert case.extra_data["enrichment_hearings"] == [{"date": "2081-01-01"}]
 
@@ -80,6 +80,34 @@ def test_save_enrichment_roundtrip(session):
         assert plaintiffs == ["रामबहादुर"]
         # '-' placeholder dropped; real address preserved
         assert defendants == [("श्यामबहादुर", "काठमाडौं")]
+
+
+def test_save_enrichment_reroutes_legacy_fields_to_extra_data(session):
+    # The 7 low-value legacy fields are not v2 columns; save_enrichment stashes
+    # any that arrive in core_fields into extra_data instead of a dropped column.
+    with session.begin():
+        session.add(
+            CourtCase(
+                case_number="081-CR-0003",
+                court_identifier="kathmandudc",
+                status="pending",
+            )
+        )
+    sp = _make(session)
+    core = {"division": "रिट १", "category": "फाँट क", "case_subject": "x"}
+    sp.save_enrichment(
+        "081-CR-0003", "kathmandudc", core, {}, {"plaintiffs": [], "defendants": []}
+    )
+    with session.begin():
+        case = (
+            session.query(CourtCase)
+            .filter_by(case_number="081-CR-0003", court_identifier="kathmandudc")
+            .first()
+        )
+        assert case.extra_data["division"] == "रिट १"
+        assert case.extra_data["category"] == "फाँट क"
+        assert case.case_subject == "x"  # real typed columns still persist
+    assert not hasattr(CourtCase, "division")  # column truly removed from the model
 
 
 def test_save_enrichment_idempotent_when_already_enriched(session):

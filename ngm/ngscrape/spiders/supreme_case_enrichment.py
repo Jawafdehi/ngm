@@ -18,7 +18,7 @@ from ngm.ngscrape.base_spiders import (
     CourtCase,
     convert_bs_to_ad,
 )
-from ngm.utils.normalizer import normalize_whitespace, normalize_date
+from ngm.utils.normalizer import coerce_count, normalize_whitespace, normalize_date
 from ngm.utils.case_status_parser import apply_status, verdict_from_hearings
 
 COURT_ID = "supreme"
@@ -116,7 +116,7 @@ def _map_field(data: Dict, label: str, value: str):
         data["division"] = value[:100]
 
     elif label in ["पेशी चढेको संख्या"]:
-        data["hearing_count"] = value[:20]
+        data["hearing_count"] = coerce_count(value)
 
 
 def parse_parties(soup: BeautifulSoup) -> Dict[str, List[Dict]]:

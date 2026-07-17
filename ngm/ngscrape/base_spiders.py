@@ -44,6 +44,19 @@ from ngm.utils.db_helpers import (
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
 
+# Low-value legacy fields the v2 ORM (Django court_cases, migration 0003) does not
+# project as columns; they are stashed in ``extra_data`` instead. Any that slip into
+# an enrichment's core_fields are rerouted there rather than setattr-ing a dropped
+# column (which would silently lose the value).
+_LEGACY_EXTRA_FIELDS = (
+    "division",
+    "category",
+    "section",
+    "priority",
+    "case_id",
+    "original_case_number",
+)
+
 # Shared retry policy. Subclasses compose this with their own tweaks, e.g.
 # ``custom_settings = {**RETRY_SETTINGS, "CONCURRENT_REQUESTS": 4}`` — Scrapy does
 # not merge ``custom_settings`` across the class hierarchy, so the spread is
@@ -371,16 +384,23 @@ class BaseCaseEnrichmentSpider(BaseScrapeSpider):
                     self.logger.info(f"Case {case_number} already enriched, skipping")
                     return True
 
+                # Reroute legacy fields to extra_data — they are not v2 columns.
+                for legacy_key in _LEGACY_EXTRA_FIELDS:
+                    if legacy_key in core_fields:
+                        extra_updates[legacy_key] = core_fields.pop(legacy_key)
+
                 for key, value in core_fields.items():
                     setattr(case, key, value)
 
                 if case.extra_data is None:
                     case.extra_data = {}
                 case.extra_data.update(extra_updates)
+                # enriched_at is stashed in extra_data (not a v2 column); updated_at
+                # already records the last write.
+                case.extra_data["enriched_at"] = now.isoformat()
                 flag_modified(case, "extra_data")
 
                 case.status = "enriched"
-                case.enriched_at = now
                 case.updated_at = now
 
                 self._replace_entities(case_number, court_identifier, entities, now)

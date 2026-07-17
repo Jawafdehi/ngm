@@ -3,6 +3,7 @@
 import pytest
 
 from ngm.utils.normalizer import (
+    coerce_count,
     fix_parenthesis_spacing,
     nepali_to_roman_numerals,
     normalize_date,
@@ -44,6 +45,23 @@ def test_numeral_roundtrip(nep, rom):
     assert nepali_to_roman_numerals(nep) == rom
     assert roman_to_nepali_numerals(rom) == nep
     assert roman_to_nepali_numerals(nepali_to_roman_numerals(nep)) == nep
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("३", 3),  # Devanagari digit (as scraped from पेशी चढेको संख्या)
+        ("12", 12),  # ASCII
+        ("१०५", 105),  # multi-digit Devanagari
+        ("पटक ७", 7),  # digit embedded in text
+        ("", None),  # empty → NULL, not an error
+        ("N/A", None),  # non-numeric → NULL
+        (None, None),
+        (5, 5),  # already an int
+    ],
+)
+def test_coerce_count(raw, expected):
+    assert coerce_count(raw) == expected
 
 
 def test_fix_parenthesis_spacing():

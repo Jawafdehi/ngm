@@ -156,6 +156,10 @@ class DistrictCourtCasesSpider(BaseCourtCasesSpider):
             extra_data = {}
             if secondary_case_number:
                 extra_data["secondary_case_number"] = secondary_case_number
+            # Low-value legacy fields → extra_data, not first-class v2 columns.
+            extra_data["section"] = section
+            extra_data["priority"] = priority
+            extra_data["case_id"] = case_id
 
             case = CourtCase(
                 case_number=case_number,
@@ -165,9 +169,6 @@ class DistrictCourtCasesSpider(BaseCourtCasesSpider):
                 case_type=case_type,
                 plaintiff=plaintiff,
                 defendant=defendant,
-                section=section,
-                priority=priority,
-                case_id=case_id,
                 extra_data=extra_data if extra_data else None,
             )
             self.case_cache.set(case)

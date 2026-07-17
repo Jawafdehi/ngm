@@ -182,7 +182,6 @@ class HighCourtEnrichmentSpider(BaseCaseEnrichmentSpider):
                 extra_data["division_officer"] = value
             elif label == "फाँट":
                 extra_data["division"] = value
-                core_fields["division"] = value[:100]
             elif label == "अदालत":
                 extra_data["court_name"] = value
             else:

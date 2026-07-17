@@ -125,16 +125,9 @@ class CourtCase(Base):
     case_type = Column(String(200), nullable=True, index=True)
     # Example: "भ्रष्टाचार ( रिसवत(घुस) )", "चेक अनादर"
 
-    # फाट
-    division = Column(String(100), nullable=True)
-    # Example: "निवेदन ४", "रिट १"
-
-    # bench_type
-    category = Column(String(100), nullable=True)
-    # Example: "फाँट क", "फाँट ख"
-
-    section = Column(String(200), nullable=True)
-    # Example: "मुद्दा फाटँ २७ (सरल)"
+    # NOTE: division / category / section are low-value legacy fields the v2 ORM
+    # (Django court_cases, migration 0003) deliberately does NOT project as columns;
+    # the scrapers stash them in ``extra_data`` instead. Do not re-add as columns.
 
     # Parties
     plaintiff = Column(Text, nullable=True)
@@ -143,16 +136,8 @@ class CourtCase(Base):
     defendant = Column(Text, nullable=True)
     # Can be multiple parties separated by "समेत"
 
-    # Related case information
-    original_case_number = Column(String(100), nullable=True)
-    # For appeals/related cases
-
-    case_id = Column(String(50), nullable=True)
-    # Internal court ID (district courts)
-
-    # Priority and processing
-    priority = Column(String(400), nullable=True)
-    # Example: "सरल" (simple/fast-track)
+    # NOTE: original_case_number / case_id / priority are likewise stashed in
+    # ``extra_data``, not first-class v2 columns (see the note above).
 
     # Enriched case information (from detail page scraping)
     registration_number = Column(String(100), nullable=True)
@@ -175,11 +160,11 @@ class CourtCase(Base):
     case_subject = Column(Text, nullable=True)
     # मुद्दाको बिषय — full case subject text (district/supreme detail pages)
 
-    hearing_count = Column(String(20), nullable=True)
-    # पेशी चढेको संख्या — number of times the case reached a hearing
+    hearing_count = Column(Integer, nullable=True)
+    # पेशी चढेको संख्या — number of times the case reached a hearing (v2: integer)
 
-    enriched_at = Column(DateTime, nullable=True, index=True)
-    # When the detail page was successfully scraped (distinct from updated_at)
+    # NOTE: enriched_at is stashed in ``extra_data`` (not a v2 column); ``updated_at``
+    # already records the last write.
 
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -18,7 +18,7 @@ from ngm.ngscrape.base_spiders import (
     CourtCase,
     convert_bs_to_ad,
 )
-from ngm.utils.normalizer import normalize_date, roman_to_nepali_numerals
+from ngm.utils.normalizer import coerce_count, normalize_date, roman_to_nepali_numerals
 from ngm.utils.case_status_parser import apply_status
 from ngm.utils.court_ids import DISTRICT_COURTS
 
@@ -208,7 +208,7 @@ class DistrictCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
                     elif label == "फैसला गर्ने मा. न्यायाधीश" and value:
                         data["verdict_judge"] = value[:200]
                     elif label == "पेशी चढेको संख्या" and value:
-                        data["hearing_count"] = value[:20]
+                        data["hearing_count"] = coerce_count(value)
 
         if "registration_number" not in data:
             for h2 in soup.find_all("h2"):
