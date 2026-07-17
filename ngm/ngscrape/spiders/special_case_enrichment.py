@@ -17,6 +17,7 @@ from ngm.ngscrape.base_spiders import (
     convert_bs_to_ad,
 )
 from ngm.utils.normalizer import normalize_whitespace, normalize_date
+from ngm.utils.case_status_parser import apply_status
 
 COURT_ID = "special"
 
@@ -207,7 +208,7 @@ class SpecialCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
                 elif label == "फाँट":
                     enrichment_data["division"] = value[:100] or None
                 elif label == "मुद्दाको स्थिती":
-                    enrichment_data["case_status"] = value[:100] or None
+                    apply_status(enrichment_data, value)
                 elif label == "वादीहरु":
                     for name in value.split(","):
                         name = name.strip()

@@ -16,6 +16,7 @@ from ngm.ngscrape.base_spiders import (
 )
 from ngm.utils.court_ids import HIGH_COURTS
 from ngm.utils.normalizer import normalize_date, normalize_whitespace
+from ngm.utils.case_status_parser import apply_status
 
 
 class HighCourtEnrichmentSpider(BaseCaseEnrichmentSpider):
@@ -160,7 +161,7 @@ class HighCourtEnrichmentSpider(BaseCaseEnrichmentSpider):
                 core_fields["case_type"] = value[:200]
                 extra_data["case_type_display"] = value
             elif label in ("मुद्दाको स्थिति", "मुद्दाको स्थिती"):
-                core_fields["case_status"] = value[:100]
+                apply_status(core_fields, value)
                 extra_data["raw_status_display"] = value
             elif label in ("फैसला मिति", "फैसला मिती"):
                 if value != "**** ** **":

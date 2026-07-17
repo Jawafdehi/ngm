@@ -19,6 +19,7 @@ from ngm.ngscrape.base_spiders import (
     convert_bs_to_ad,
 )
 from ngm.utils.normalizer import normalize_whitespace, normalize_date
+from ngm.utils.case_status_parser import apply_status
 
 COURT_ID = "supreme"
 
@@ -95,7 +96,7 @@ def _map_field(data: Dict, label: str, value: str):
             data["case_subject"] = value
 
     elif label in ["मुद्दाको स्थिती", "मुद्दाको स्थिति"]:
-        data["case_status"] = value[:100]
+        apply_status(data, value)
 
     elif label in ["फैसला मिती", "फैसला मिति", "निर्णय मिति"]:
         # Don't store the "no verdict yet" sentinel as a fake date — leave NULL.
@@ -103,8 +104,10 @@ def _map_field(data: Dict, label: str, value: str):
             data["verdict_date_bs"] = normalize_date(value)
             data["verdict_date_ad"] = convert_bs_to_ad(normalize_date(value))
 
-    elif label in ["फैसला", "आदेश /फैसलाको किसिम"]:
-        data["verdict_type"] = value[:100]
+    # NOTE: the old ``label in ["फैसला", "आदेश /फैसलाको किसिम"]`` branch was
+    # removed — "आदेश /फैसलाको किसिम" is a table *header*, not a field label, and
+    # matching it leaked the header string into ~103k rows. verdict_type is now
+    # derived from apply_status() (the status field) + the hearing fallback.
 
     elif label in ["फैसला गर्ने मा. न्यायाधीश", "न्यायाधीश"]:
         data["verdict_judge"] = value[:200]

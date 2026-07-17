@@ -22,6 +22,7 @@ from ngm.utils.case_status_parser import (
     SETTLED,
     UNKNOWN,
     WITHDRAWN,
+    apply_status,
     parse_case_status,
     verdict_from_hearings,
 )
@@ -144,3 +145,40 @@ def test_verdict_from_hearings_none_when_interlocutory_only():
 def test_verdict_from_hearings_empty():
     assert verdict_from_hearings([]) is None
     assert verdict_from_hearings(None) is None
+
+
+# apply_status — the enrichment-spider integration point.
+def test_apply_status_drops_header_artifact():
+    # The 103,212-row bug: header must NOT be written as case_status (DQ-01).
+    target = {}
+    apply_status(target, "आदेश /फैसलाको किसिम")
+    assert "case_status" not in target
+    assert "verdict_type" not in target
+
+
+def test_apply_status_arrow_sets_status_and_verdict():
+    target = {}
+    apply_status(target, "फैसला / अन्तिम आदेश >> अभियोग दावी पुग्ने")
+    assert target["case_status"] == "फैसला / अन्तिम आदेश >> अभियोग दावी पुग्ने"
+    assert target["verdict_type"] == CONVICTED
+
+
+def test_apply_status_paren_fills_verdict_date():
+    target = {}
+    apply_status(target, "फैसला (मिती: २०८२/०९/२८)")
+    assert target["verdict_date_bs"] == "2082-09-28"
+    assert target["verdict_date_ad"] is not None
+
+
+def test_apply_status_does_not_overwrite_dedicated_verdict_date():
+    # A dedicated "फैसला मिति" field already set the date — parser must not clobber it.
+    target = {"verdict_date_bs": "2081-01-17", "verdict_date_ad": "already"}
+    apply_status(target, "फैसला (मिती: २०८२/०९/२८)")
+    assert target["verdict_date_bs"] == "2081-01-17"
+    assert target["verdict_date_ad"] == "already"
+
+
+def test_apply_status_empty_sets_nothing():
+    target = {}
+    apply_status(target, "")
+    assert target == {}

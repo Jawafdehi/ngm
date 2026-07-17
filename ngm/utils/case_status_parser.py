@@ -188,6 +188,31 @@ def parse_case_status(raw: str | None) -> ParsedCaseStatus:
     return ParsedCaseStatus(lifecycle_status=UNKNOWN)
 
 
+def apply_status(target: dict, raw_value: str | None) -> None:
+    """Fill a CourtCase update-dict's status columns from a raw status string.
+
+    Integration point for the enrichment spiders: replaces the old
+    ``target["case_status"] = value[:100]`` one-liners. Behaviour:
+
+    - stores ``case_status`` only when the value is a *real* status — a header
+      artifact / empty value (lifecycle UNKNOWN) is dropped, not stored (DQ-01);
+    - sets ``verdict_type`` to the normalised enum when derivable (DQ-02);
+    - fills ``verdict_date_bs``/``_ad`` from a paren-embedded date **only if the
+      caller has not already set one** from a dedicated verdict-date field, so an
+      authoritative field always wins (DQ-03).
+
+    Mutates ``target`` in place; sets nothing it cannot derive.
+    """
+    parsed = parse_case_status(raw_value)
+    if parsed.lifecycle_status != UNKNOWN:
+        target["case_status"] = normalize_whitespace(raw_value or "")[:100]
+    if parsed.verdict_type:
+        target["verdict_type"] = parsed.verdict_type
+    if parsed.verdict_date_bs and not target.get("verdict_date_bs"):
+        target["verdict_date_bs"] = parsed.verdict_date_bs
+        target["verdict_date_ad"] = parsed.verdict_date_ad
+
+
 def verdict_from_hearings(hearings) -> str | None:
     """Best-effort verdict_type from the final decisive hearing.
 

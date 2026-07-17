@@ -19,6 +19,7 @@ from ngm.ngscrape.base_spiders import (
     convert_bs_to_ad,
 )
 from ngm.utils.normalizer import normalize_date, roman_to_nepali_numerals
+from ngm.utils.case_status_parser import apply_status
 from ngm.utils.court_ids import DISTRICT_COURTS
 
 
@@ -197,7 +198,7 @@ class DistrictCaseEnrichmentSpider(BaseCaseEnrichmentSpider):
                     elif label == "मुद्दाको बिषय" and value:
                         data["case_subject"] = value
                     elif label == "मुद्दाको स्थिति" and value:
-                        data["case_status"] = value[:100]
+                        apply_status(data, value)
                     elif label == "फैसला मिति" and value and value != "**** ** **":
                         # Don't store the "no verdict" sentinel as a fake date.
                         data["verdict_date_bs"] = normalize_date(value)
